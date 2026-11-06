@@ -1,0 +1,560 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Bolescothegoat - FaceLab. See LICENSE.
+
+#include "FamilyLoad.h"
+
+#include "TriFile.h"
+
+#include <algorithm>
+#include <cmath>
+#include <format>
+
+namespace FaceLab::Fam
+{
+	namespace
+	{
+		std::string Lower(std::string s)
+		{
+			for (auto& c : s) {
+				c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+			}
+			return s;
+		}
+
+		// mean distance between two base-vertex lists of the same length (the same mesh gives ~0; another mesh with the same vertex count gives a lot)
+		double MeanDistance(const std::vector<float>& a, const std::vector<float>& b)
+		{
+			if (a.size() != b.size() || a.empty()) {
+				return 0.0;
+			}
+			double sum = 0.0;
+			const std::size_t n = a.size() / 3;
+			for (std::size_t i = 0; i < n; ++i) {
+				const double dx = a[i * 3] - b[i * 3], dy = a[i * 3 + 1] - b[i * 3 + 1], dz = a[i * 3 + 2] - b[i * 3 + 2];
+				sum += std::sqrt(dx * dx + dy * dy + dz * dz);
+			}
+			return sum / static_cast<double>(n);
+		}
+
+		// One eye at a time: every Look morph again with only the vertices of her left (x < 0) or right (x > 0) side. The eyes, the lids in the head and the brows all split the same way.
+		// Pure-rotation eye turns (EyeLeftTurnUp ... EyeRightTurnRight): the shipped Look morphs mostly SLIDE the eyeball up or down, which exposes the dark baked rim of the eye
+		// texture under the lid when looking up. These turn the eyeball about its own centre instead: 10 degrees per 1.0 of weight. Only for the eye files.
+		void AddEyeMorphs(Part& out, bool eyeFile)
+		{
+			const int nv = out.nv;
+			if (out.base.size() != static_cast<std::size_t>(nv) * 3) {
+				return;
+			}
+			std::vector<int> side(static_cast<std::size_t>(nv), 0);
+			for (int i = 0; i < nv; ++i) {
+				const float x = out.base[static_cast<std::size_t>(i) * 3];
+				side[static_cast<std::size_t>(i)] = x < -0.01f ? -1 : (x > 0.01f ? 1 : 0);
+			}
+			for (const char* dir : { "Left", "Right", "Up", "Down" }) {
+				const auto src = out.morphs.find(std::string("Look") + dir);
+				if (src == out.morphs.end()) {
+					continue;
+				}
+				for (const int s : { -1, 1 }) {
+					std::vector<float> dl = src->second;
+					for (std::size_t i = 0; i < static_cast<std::size_t>(nv); ++i) {
+						if (side[i] != s) {
+							dl[i * 3] = dl[i * 3 + 1] = dl[i * 3 + 2] = 0.0f;
+						}
+					}
+					out.morphs[std::string(s < 0 ? "EyeLeftLook" : "EyeRightLook") + dir] = std::move(dl);
+				}
+			}
+			if (!eyeFile || !out.morphs.contains("LookLeft")) {
+				return;
+			}
+			const float a = 10.0f * 3.14159265f / 180.0f;
+			const float sn = std::sin(a), cs = std::cos(a);
+			// How much each vertex may turn: the shipped Look morphs move the front of the eye a lot and the rim next to the lids and lashes hardly at all
+			// (a rigid turn pulled the rim away from the lids). So each vertex turns by min(1, its largest shipped move / 0.15).
+			std::vector<float> mask(static_cast<std::size_t>(nv), 1.0f);
+			for (int i = 0; i < nv; ++i) {
+				float m = 0.0f;
+				for (const char* nm : { "LookLeft", "LookRight", "LookUp", "LookDown" }) {
+					if (const auto it = out.morphs.find(nm); it != out.morphs.end()) {
+						const auto& dd = it->second;
+						const auto  k = static_cast<std::size_t>(i) * 3;
+						m = std::max(m, std::sqrt(dd[k] * dd[k] + dd[k + 1] * dd[k + 1] + dd[k + 2] * dd[k + 2]));
+					}
+				}
+				mask[static_cast<std::size_t>(i)] = std::min(1.0f, m / 0.15f);
+			}
+			for (const int s : { -1, 1 }) {
+				double cx = 0, cy = 0, cz = 0;
+				int    n = 0;
+				for (int i = 0; i < nv; ++i) {
+					if (side[static_cast<std::size_t>(i)] != s) {
+						continue;
+					}
+					cx += out.base[static_cast<std::size_t>(i) * 3];
+					cy += out.base[static_cast<std::size_t>(i) * 3 + 1];
+					cz += out.base[static_cast<std::size_t>(i) * 3 + 2];
+					++n;
+				}
+				if (n < 8) {
+					continue;
+				}
+				cx /= n;
+				cy /= n;
+				cz /= n;
+				const char* names[4] = { "Left", "Right", "Up", "Down" };
+				for (int dirIdx = 0; dirIdx < 4; ++dirIdx) {
+					std::vector<float> dl(static_cast<std::size_t>(nv) * 3, 0.0f);
+					for (int i = 0; i < nv; ++i) {
+						if (side[static_cast<std::size_t>(i)] != s) {
+							continue;
+						}
+						const float px = out.base[static_cast<std::size_t>(i) * 3] - static_cast<float>(cx), py = out.base[static_cast<std::size_t>(i) * 3 + 1] - static_cast<float>(cy),
+						            pz = out.base[static_cast<std::size_t>(i) * 3 + 2] - static_cast<float>(cz);
+						float nx = px, ny = py, nz = pz;
+						switch (dirIdx) {
+						case 0:  // look to her left: the front of the eye moves to -x (rotate about up)
+							nx = px * cs - py * sn;
+							ny = px * sn + py * cs;
+							break;
+						case 1:  // look to her right
+							nx = px * cs + py * sn;
+							ny = -px * sn + py * cs;
+							break;
+						case 2:  // look up: the front moves to +z (rotate about her right axis)
+							ny = py * cs - pz * sn;
+							nz = py * sn + pz * cs;
+							break;
+						default:  // look down
+							ny = py * cs + pz * sn;
+							nz = -py * sn + pz * cs;
+							break;
+						}
+						const float mk = mask[static_cast<std::size_t>(i)];
+						dl[static_cast<std::size_t>(i) * 3] = (nx - px) * mk;
+						dl[static_cast<std::size_t>(i) * 3 + 1] = (ny - py) * mk;
+						dl[static_cast<std::size_t>(i) * 3 + 2] = (nz - pz) * mk;
+					}
+					out.morphs[std::string(s < 0 ? "EyeLeftTurn" : "EyeRightTurn") + names[dirIdx]] = std::move(dl);
+				}
+			}
+		}
+
+		bool Has(const std::string& hay, const char* needle)
+		{
+			return Lower(hay).find(needle) != std::string::npos;
+		}
+
+		// the parts that sit on or inside the head and have to move with it: the mouth (teeth, tongue), brows, lashes, eye shadows
+		bool IsFollower(const Part& p)
+		{
+			for (const auto& r : p.rels) {
+				if (Has(r, "mouth") || Has(r, "brows") || Has(r, "lashes") || Has(r, "shadow")) {
+					return true;
+				}
+			}
+			return false;
+		}
+
+		// Every morph of the head, carried over to a part that follows it: each vertex of the part takes the weighted mean of the offsets of its nearest head vertices
+		// (inverse square distance), so the teeth and tongue follow the lips and jaw, the lashes the lids, the brows the brow ridge, whatever the expression is called.
+		void FollowHead(const Part& head, Part& target, std::vector<std::string>* log)
+		{
+			constexpr int K = 6;
+			const int     hn = head.nv, tn = target.nv;
+			if (head.base.size() != static_cast<std::size_t>(hn) * 3 || target.base.size() != static_cast<std::size_t>(tn) * 3) {
+				return;
+			}
+			std::vector<int>   idx(static_cast<std::size_t>(tn) * K, 0);
+			std::vector<float> wt(static_cast<std::size_t>(tn) * K, 0.0f);
+			double             meanNearest = 0.0;
+			for (int v = 0; v < tn; ++v) {
+				const float px = target.base[static_cast<std::size_t>(v) * 3], py = target.base[static_cast<std::size_t>(v) * 3 + 1], pz = target.base[static_cast<std::size_t>(v) * 3 + 2];
+				float       bd[K];
+				int         bi[K];
+				for (int k = 0; k < K; ++k) {
+					bd[k] = 1e30f;
+					bi[k] = 0;
+				}
+				for (int u = 0; u < hn; ++u) {
+					const float dx = head.base[static_cast<std::size_t>(u) * 3] - px, dy = head.base[static_cast<std::size_t>(u) * 3 + 1] - py, dz = head.base[static_cast<std::size_t>(u) * 3 + 2] - pz;
+					const float d2 = dx * dx + dy * dy + dz * dz;
+					if (d2 >= bd[K - 1]) {
+						continue;
+					}
+					int k = K - 1;
+					while (k > 0 && bd[k - 1] > d2) {
+						bd[k] = bd[k - 1];
+						bi[k] = bi[k - 1];
+						--k;
+					}
+					bd[k] = d2;
+					bi[k] = u;
+				}
+				float sum = 0.0f;
+				for (int k = 0; k < K; ++k) {
+					const float w = 1.0f / (bd[k] + 0.0025f);  // inverse square distance; the 0.05 unit floor keeps a vertex that sits on a head vertex from taking only that one
+					wt[static_cast<std::size_t>(v) * K + static_cast<std::size_t>(k)] = w;
+					idx[static_cast<std::size_t>(v) * K + static_cast<std::size_t>(k)] = bi[k];
+					sum += w;
+				}
+				for (int k = 0; k < K; ++k) {
+					wt[static_cast<std::size_t>(v) * K + static_cast<std::size_t>(k)] /= sum;
+				}
+				meanNearest += std::sqrt(bd[0]);
+			}
+			int carried = 0;
+			for (const auto& [name, hd] : head.morphs) {
+				std::vector<float> out(static_cast<std::size_t>(tn) * 3, 0.0f);
+				bool               any = false;
+				for (int v = 0; v < tn; ++v) {
+					float ox = 0.0f, oy = 0.0f, oz = 0.0f;
+					for (int k = 0; k < K; ++k) {
+						const float w = wt[static_cast<std::size_t>(v) * K + static_cast<std::size_t>(k)];
+						const auto  u = static_cast<std::size_t>(idx[static_cast<std::size_t>(v) * K + static_cast<std::size_t>(k)]) * 3;
+						ox += w * hd[u];
+						oy += w * hd[u + 1];
+						oz += w * hd[u + 2];
+					}
+					out[static_cast<std::size_t>(v) * 3] = ox;
+					out[static_cast<std::size_t>(v) * 3 + 1] = oy;
+					out[static_cast<std::size_t>(v) * 3 + 2] = oz;
+					if (ox != 0.0f || oy != 0.0f || oz != 0.0f) {
+						any = true;
+					}
+				}
+				if (any) {
+					target.morphs[name] = std::move(out);
+					++carried;
+				}
+			}
+			if (log) {
+				log->push_back(std::format("{} vertices follow the head ({} morphs carried over, mean distance to the nearest head vertex {:.2f}): {}", tn, carried, meanNearest / tn, target.rels.empty() ? std::string{} : target.rels.front()));
+			}
+		}
+
+		// ---- the mouth (teeth, tongue, throat) is rigid: it must not stretch like skin ----
+		struct Mat3
+		{
+			double m[3][3];
+		};
+
+		double Det(const Mat3& a)
+		{
+			return a.m[0][0] * (a.m[1][1] * a.m[2][2] - a.m[1][2] * a.m[2][1]) - a.m[0][1] * (a.m[1][0] * a.m[2][2] - a.m[1][2] * a.m[2][0]) + a.m[0][2] * (a.m[1][0] * a.m[2][1] - a.m[1][1] * a.m[2][0]);
+		}
+
+		bool InverseTranspose(const Mat3& a, Mat3& out)
+		{
+			const double d = Det(a);
+			if (std::fabs(d) < 1e-18) {
+				return false;
+			}
+			const auto& m = a.m;
+			// inverse = adjugate / det; we want its transpose
+			out.m[0][0] = (m[1][1] * m[2][2] - m[1][2] * m[2][1]) / d;
+			out.m[0][1] = -(m[1][0] * m[2][2] - m[1][2] * m[2][0]) / d;
+			out.m[0][2] = (m[1][0] * m[2][1] - m[1][1] * m[2][0]) / d;
+			out.m[1][0] = -(m[0][1] * m[2][2] - m[0][2] * m[2][1]) / d;
+			out.m[1][1] = (m[0][0] * m[2][2] - m[0][2] * m[2][0]) / d;
+			out.m[1][2] = -(m[0][0] * m[2][1] - m[0][1] * m[2][0]) / d;
+			out.m[2][0] = (m[0][1] * m[1][2] - m[0][2] * m[1][1]) / d;
+			out.m[2][1] = -(m[0][0] * m[1][2] - m[0][2] * m[1][0]) / d;
+			out.m[2][2] = (m[0][0] * m[1][1] - m[0][1] * m[1][0]) / d;
+			return true;
+		}
+
+		// the rotation closest to A (the orthogonal factor of its polar decomposition); identity when A is degenerate
+		Mat3 PolarRotation(Mat3 a)
+		{
+			Mat3 id{ { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 } } };
+			for (int it = 0; it < 40; ++it) {
+				Mat3 it2;
+				if (!InverseTranspose(a, it2)) {
+					return id;
+				}
+				double diff = 0.0;
+				for (int i = 0; i < 3; ++i) {
+					for (int j = 0; j < 3; ++j) {
+						const double n = 0.5 * (a.m[i][j] + it2.m[i][j]);
+						diff += std::fabs(n - a.m[i][j]);
+						a.m[i][j] = n;
+					}
+				}
+				if (diff < 1e-10) {
+					break;
+				}
+			}
+			return Det(a) > 0.0 ? a : id;
+		}
+
+		// R limited to maxDeg degrees (a jaw does not turn further): rotate by the same axis, capped angle
+		Mat3 CapRotation(const Mat3& r, double maxDeg)
+		{
+			const double tr = r.m[0][0] + r.m[1][1] + r.m[2][2];
+			const double ang = std::acos(std::clamp((tr - 1.0) * 0.5, -1.0, 1.0));
+			const double cap = maxDeg * 3.14159265358979 / 180.0;
+			if (ang <= cap || ang < 1e-9) {
+				return r;
+			}
+			double ax = r.m[2][1] - r.m[1][2], ay = r.m[0][2] - r.m[2][0], az = r.m[1][0] - r.m[0][1];
+			const double n = std::sqrt(ax * ax + ay * ay + az * az);
+			if (n < 1e-12) {
+				return r;
+			}
+			ax /= n;
+			ay /= n;
+			az /= n;
+			const double c = std::cos(cap), s = std::sin(cap), t = 1.0 - c;
+			Mat3         o{ { { t * ax * ax + c, t * ax * ay - s * az, t * ax * az + s * ay },
+				{ t * ax * ay + s * az, t * ay * ay + c, t * ay * az - s * ax },
+				{ t * ax * az - s * ay, t * ay * az + s * ax, t * az * az + c } } };
+			return o;
+		}
+
+		// The mouth part: every vertex belongs more or less to the lower jaw (its own jaw-open morph, BigAah, says how much: the lower teeth and the tongue move, the upper
+		// teeth and the throat hardly). For each head morph, the head's lower jaw is fitted with ONE rigid motion (rotation + shift) from the head vertices that move with
+		// its jaw, and the lower-jaw vertices of the mouth part get exactly that motion: teeth and tongue keep their shape instead of stretching with the lips.
+		constexpr double kJawTurn = 0.5;  // 0 = the jaw only shifts, 1 = shifts and turns exactly like the head's jaw
+
+		void FollowJaw(const Part& head, Part& target, std::vector<std::string>* log)
+		{
+			const int hn = head.nv, tn = target.nv;
+			const auto ownIt = target.morphs.find("BigAah");
+			const auto headIt = head.morphs.find("BigAah");
+			if (ownIt == target.morphs.end() || headIt == head.morphs.end() || head.base.size() != static_cast<std::size_t>(hn) * 3 || target.base.size() != static_cast<std::size_t>(tn) * 3) {
+				if (log) {
+					log->push_back("the mouth part has no BigAah to tell its jaw by: it follows the head like skin instead: " + (target.rels.empty() ? std::string{} : target.rels.front()));
+				}
+				FollowHead(head, target, log);
+				return;
+			}
+			const auto mag = [](const std::vector<float>& d, int v) {
+				const auto k = static_cast<std::size_t>(v) * 3;
+				return std::sqrt(d[k] * d[k] + d[k + 1] * d[k + 1] + d[k + 2] * d[k + 2]);
+			};
+			// how much of the lower jaw each mouth vertex is
+			std::vector<float> wJaw(static_cast<std::size_t>(tn), 0.0f);
+			float              maxOwn = 0.0f;
+			for (int v = 0; v < tn; ++v) {
+				maxOwn = std::max(maxOwn, mag(ownIt->second, v));
+			}
+			if (maxOwn < 1e-6f) {
+				return;
+			}
+			for (int v = 0; v < tn; ++v) {
+				const float r = mag(ownIt->second, v) / maxOwn;
+				const float x = std::clamp((r - 0.10f) / 0.50f, 0.0f, 1.0f);
+				wJaw[static_cast<std::size_t>(v)] = x * x * (3.0f - 2.0f * x);  // smoothstep
+			}
+			// the head vertices around the mouth, and how much each moves with the jaw (the head's own BigAah)
+			float lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
+			for (int v = 0; v < tn; ++v) {
+				for (int k = 0; k < 3; ++k) {
+					lo[k] = std::min(lo[k], target.base[static_cast<std::size_t>(v) * 3 + static_cast<std::size_t>(k)]);
+					hi[k] = std::max(hi[k], target.base[static_cast<std::size_t>(v) * 3 + static_cast<std::size_t>(k)]);
+				}
+			}
+			float maxHead = 0.0f;
+			std::vector<int> region;
+			for (int u = 0; u < hn; ++u) {
+				const float x = head.base[static_cast<std::size_t>(u) * 3], y = head.base[static_cast<std::size_t>(u) * 3 + 1], z = head.base[static_cast<std::size_t>(u) * 3 + 2];
+				if (x < lo[0] - 4.0f || x > hi[0] + 4.0f || y < lo[1] - 4.0f || y > hi[1] + 4.0f || z < lo[2] - 8.0f || z > hi[2] + 2.0f) {
+					continue;
+				}
+				region.push_back(u);
+				maxHead = std::max(maxHead, mag(headIt->second, u));
+			}
+			std::vector<std::pair<int, float>> jaw;  // head vertex, weight
+			for (const int u : region) {
+				const float r = mag(headIt->second, u) / std::max(maxHead, 1e-6f);
+				if (r > 0.25f) {
+					jaw.push_back({ u, std::min(1.0f, (r - 0.25f) / 0.5f) });
+				}
+			}
+			if (jaw.size() < 20) {
+				if (log) {
+					log->push_back("too few head vertices move with the jaw: the mouth part follows the head like skin instead");
+				}
+				FollowHead(head, target, log);
+				return;
+			}
+			int carried = 0;
+			for (const auto& [name, hd] : head.morphs) {
+				// weighted centroids of the jaw before and after
+				double wsum = 0.0, cp[3] = { 0, 0, 0 }, cq[3] = { 0, 0, 0 };
+				for (const auto& [u, w] : jaw) {
+					const auto k = static_cast<std::size_t>(u) * 3;
+					for (int c = 0; c < 3; ++c) {
+						cp[c] += w * head.base[k + static_cast<std::size_t>(c)];
+						cq[c] += w * (head.base[k + static_cast<std::size_t>(c)] + hd[k + static_cast<std::size_t>(c)]);
+					}
+					wsum += w;
+				}
+				for (int c = 0; c < 3; ++c) {
+					cp[c] /= wsum;
+					cq[c] /= wsum;
+				}
+				Mat3 a{};
+				for (const auto& [u, w] : jaw) {
+					const auto k = static_cast<std::size_t>(u) * 3;
+					double     p[3], q[3];
+					for (int c = 0; c < 3; ++c) {
+						p[c] = head.base[k + static_cast<std::size_t>(c)] - cp[c];
+						q[c] = head.base[k + static_cast<std::size_t>(c)] + hd[k + static_cast<std::size_t>(c)] - cq[c];
+					}
+					for (int i = 0; i < 3; ++i) {
+						for (int j = 0; j < 3; ++j) {
+							a.m[i][j] += w * q[i] * p[j];
+						}
+					}
+				}
+				const Mat3 rot = CapRotation(PolarRotation(a), 40.0);
+				std::vector<float> out(static_cast<std::size_t>(tn) * 3, 0.0f);
+				bool               any = false;
+				for (int v = 0; v < tn; ++v) {
+					const float w = wJaw[static_cast<std::size_t>(v)];
+					if (w <= 0.0f) {
+						continue;
+					}
+					const auto   k = static_cast<std::size_t>(v) * 3;
+					const double px = target.base[k] - cp[0], py = target.base[k + 1] - cp[1], pz = target.base[k + 2] - cp[2];
+					// the jaw's shift, plus only a part (kJawTurn) of its turn: a morph is blended in a straight line, so a full rotation stretches the teeth as soon as the weight
+					// goes above 1 (FaceLab goes to 3). Mostly shift keeps teeth and tongue the shape they have at any weight.
+					const double nx = (cq[0] - cp[0]) + kJawTurn * (rot.m[0][0] * px + rot.m[0][1] * py + rot.m[0][2] * pz - px);
+					const double ny = (cq[1] - cp[1]) + kJawTurn * (rot.m[1][0] * px + rot.m[1][1] * py + rot.m[1][2] * pz - py);
+					const double nz = (cq[2] - cp[2]) + kJawTurn * (rot.m[2][0] * px + rot.m[2][1] * py + rot.m[2][2] * pz - pz);
+					out[k] = static_cast<float>(w * nx);
+					out[k + 1] = static_cast<float>(w * ny);
+					out[k + 2] = static_cast<float>(w * nz);
+					if (std::fabs(nx) + std::fabs(ny) + std::fabs(nz) > 1e-6) {
+						any = true;
+					}
+				}
+				if (any) {
+					target.morphs[name] = std::move(out);
+					++carried;
+				}
+			}
+			if (log) {
+				int heavy = 0;
+				for (const float w : wJaw) {
+					heavy += w > 0.5f ? 1 : 0;
+				}
+				log->push_back(std::format("mouth part rigid with the jaw: {} of {} vertices are lower jaw (weight > 0.5), {} head vertices fitted, {} morphs carried over: {}", heavy, tn, jaw.size(), carried,
+					target.rels.empty() ? std::string{} : target.rels.front()));
+			}
+		}
+	}
+
+	std::vector<Header> Headers(const Def& def, const Resolver& resolve)
+	{
+		std::vector<Header> out;
+		for (const char* rel : def.files) {
+			const std::string full = resolve(rel);
+			int               nv = 0;
+			if (!full.empty() && Tri::ReadVertexCount(full, nv)) {
+				out.push_back({ nv, full });
+			}
+		}
+		return out;
+	}
+
+	std::vector<Part> Load(const Def& def, const Resolver& resolve, std::vector<std::string>* log)
+	{
+		const auto note = [&](std::string s) {
+			if (log) {
+				log->push_back(std::move(s));
+			}
+		};
+		std::vector<Part> parts;
+		for (const char* rel : def.files) {
+			const std::string full = resolve(rel);
+			if (full.empty()) {
+				continue;
+			}
+			Tri::File   f;
+			std::string err;
+			if (!Tri::Read(full, f, err)) {
+				note(std::format("{}: cannot use {} ({})", def.name, full, err));
+				continue;
+			}
+			if (!err.empty()) {
+				note(std::format("{}: {} ({})", def.name, full, err));
+			}
+			Part* into = nullptr;
+			for (auto& p : parts) {
+				if (p.nv == f.nv && MeanDistance(p.base, f.base) < 0.5) {
+					into = &p;
+					break;
+				}
+			}
+			if (!into) {
+				parts.emplace_back();
+				into = &parts.back();
+				into->nv = f.nv;
+				into->base = std::move(f.base);
+				for (const auto& other : parts) {  // a second mesh with the same count: worth knowing about
+					if (&other != into && other.nv == into->nv) {
+						note(std::format("{}: {} has the same vertex count ({}) as {} but another shape: kept as a separate part", def.name, full, f.nv, other.files.front()));
+						break;
+					}
+				}
+			}
+			into->files.push_back(full);
+			into->rels.push_back(rel);
+			int added = 0;
+			for (auto& [name, dl] : f.morphs) {
+				if (into->morphs.try_emplace(name, std::move(dl)).second) {
+					++added;
+				}
+			}
+			note(std::format("{}: {} -> {} vertices, {} morph(s), {} new", def.name, full, f.nv, f.morphs.size(), added));
+		}
+		for (auto& p : parts) {
+			bool eyeFile = false;
+			for (const auto& fl : p.rels) {
+				if (Lower(fl).find("eyes") != std::string::npos) {
+					eyeFile = true;
+				}
+			}
+			AddEyeMorphs(p, eyeFile);
+		}
+		if (def.followHead && parts.size() > 1) {
+			// parts[0] is the head (its file is first in the list)
+			for (std::size_t i = 1; i < parts.size(); ++i) {
+				if (!IsFollower(parts[i])) {
+					continue;
+				}
+				bool mouth = false;
+				for (const auto& r : parts[i].rels) {
+					mouth = mouth || Has(r, "mouth");
+				}
+				if (mouth) {
+					FollowJaw(parts[0], parts[i], log);  // teeth and tongue are rigid
+				} else {
+					FollowHead(parts[0], parts[i], log);  // brows, lashes, eye shadows lie on the skin
+				}
+			}
+		}
+		return parts;
+	}
+
+	bool LoadFile(const std::string& fullPath, Part& out, std::string& err)
+	{
+		Tri::File f;
+		if (!Tri::Read(fullPath, f, err)) {
+			return false;
+		}
+		out = Part{};
+		out.nv = f.nv;
+		out.base = std::move(f.base);
+		out.files.push_back(fullPath);
+		out.rels.push_back(fullPath);
+		for (auto& [name, dl] : f.morphs) {
+			out.morphs.try_emplace(name, std::move(dl));
+		}
+		AddEyeMorphs(out, Lower(fullPath).find("eyes") != std::string::npos);
+		return !out.morphs.empty();
+	}
+}

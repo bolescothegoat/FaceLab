@@ -1,0 +1,70 @@
+[size=5][b]FaceLab[/b][/size]
+[i]RaceMenu-style face morphs, live in the game world - on you or on any NPC. A tool for players, and a face API for mod authors.[/i]
+
+[size=4][b]What is it?[/b][/size]
+RaceMenu has expression sliders (Smile, Sad, Angry, BigAah ...) that go up to 3.0, far beyond what the game's face animation ever uses. FaceLab plays those same morphs [b]live in the world[/b], held while a scene runs, faded in and out, and layered between mods. You can try expressions on yourself or on an NPC, and other mods can ask for a named face ("pleased", "shocked", "tongue out") without writing any face code.
+
+[b]On its own FaceLab changes nothing in your game.[/b] It is a lab, and the thing other mods plug into.
+
+[size=4][b]Requirements[/b][/size]
+[list]
+[*]Skyrim SE 1.5.97, or AE 1.6.x / 1.7.x (one DLL, Address Library). [b]Only AE 1.6.1170 has been tested by me[/b]; the other versions are supported through the Address Library but untested
+[*]SKSE and the matching Address Library
+[*]SKSE Menu Framework (the FaceLab menu lives in it)
+[*][b]A head with morph files.[/b] FaceLab ships none, it reads the ones you already have:
+[/list]
+[table]
+[tr][td][b]Head[/b][/td][td][b]Needs[/b][/td][/tr]
+[tr][td]High Poly Head (male / female)[/td][td]High Poly Head[/td][/tr]
+[tr][td]Vanilla head (male / female)[/td][td]Expressive Facial Animation[/td][/tr]
+[tr][td]CoTR [b]original low poly[/b] head (male / female)[/td][td]CoTR's expression files. The CoTR High Poly head is [b]not[/b] supported[/td][/tr]
+[tr][td]UBE (female)[/td][td]UBE 2.0[/td][/tr]
+[/table]
+Heads that have extra morphs (CoTR's Smile001..., UBE's Ahegao, Kiss, Yawning...) show them as extra sliders automatically. A head FaceLab does not know is reported as "not supported" in the log and left alone.
+
+[size=4][b]Using it (players)[/b][/size]
+Open the SKSE Menu Framework menu and choose [b]FaceLab[/b]. Three pages:
+[b]Face[/b]
+[list]
+[*]Pick the target: the player, or the NPC you last looked at (close the menu, look at them, reopen it).
+[*]Move the sliders (0-300, which is the RaceMenu weight x 100; 300 = 3.0). Press [i]Apply all sliders[/i], or tick "apply as soon as I move it". [i]Reset the target's face[/i] takes it off.
+[*]A face you apply here outranks every other mod's face and lets go by itself after the "holds for" time (0 = until Reset).
+[*]Start with [i]Just BigAah 3.0[/i] to check that it works on your target.
+[/list]
+[b]Presets[/b] - the named faces other mods use. Load one into the sliders to see it, change it, and save it back or as a new name. They are plain text files in [font=Courier New]Data/SKSE/Plugins/FaceLab/Presets[/font].
+[b]Controls[/b] - one hotkey (keyboard or gamepad, with modifier) that applies the sliders and, on the next press, resets. Default gamepad: X while holding D-pad Down.
+
+A face is [b]never saved[/b]: a new game or a load drops every face, so nothing can get stuck in your save.
+
+[size=4][b]Special channels[/b][/size]
+[list]
+[*][b]TongueOut[/b] - the face asks a tongue mod for the tongue
+[*][b]OralMode[/b] - 50 or more marks an oral scene: the mouth belongs to OStim, FaceLab's mouth gives way
+[*][b]MouthAssist[/b] - an opening that fades out as the natural mouth opens
+[*][b]EyesCross[/b] - The Fourth Wall lets go of the eyes while this is on
+[/list]
+
+[size=4][b]For mod authors[/b][/size]
+Ship a text file of named faces, then ask for one by name from Papyrus or from an SKSE plugin:
+[code]
+; Data/SKSE/Plugins/FaceLab/Presets/MyMod.toml
+[[preset]]
+name = "MyMod.Kissing.Pleased"
+weights = { MoodHappy = 120, BigAah = 40 }
+
+; Papyrus
+FaceLab.ApplyFace(akActor, "MyMod", "MyMod.Kissing.Pleased", 0.5, 10)
+FaceLab.ClearFace(akActor, "MyMod", 0.5)
+[/code]
+Your face is a layer owned by your mod: the highest priority wins, clearing removes only yours, and a missing "Displeased" or "Pleased" falls back to "Neutral". There is a C++ header too (no link library), lip-sync yield, mouth/tongue/eye read-backs and a gaze layer. The API files are [b]MIT[/b]: using them does not put your mod under the GPL, and if FaceLab is missing your calls simply do nothing.
+Full guide: [i]MODDER_GUIDE.md[/i] in the downloads and on GitHub.
+
+[size=4][b]Troubleshooting[/b][/size]
+Open [font=Courier New]Documents/My Games/Skyrim Special Edition/SKSE/FaceLab.log[/font]. The line [i]"Morph: &lt;name&gt; uses head family '...'"[/i] means it works on that actor. [i]"is not supported: none of the head families fits"[/i] means the head, or its morph mod, is not one of the supported ones. Scattered lines or a deformed head [b]in RaceMenu itself[/b] mean two morph mods overwrite each other (different vertex counts) - a load order problem, not FaceLab. If you report something, tick [i]Debug tools[/i] on the Face page first and attach the log.
+
+[size=4][b]Compatible with[/b][/size]
+OStim scene mods (scene faces), tongue mods (TongueOut), The Fourth Wall (EyesCross, gaze), SMP physics and RaceMenu. Nothing is written to your save.
+
+[size=4][b]Licence and source[/b][/size]
+FaceLab is free software, [b]GPL-3.0-or-later[/b]. Source: [i](GitHub link)[/i]. The two API files (C++ header and Papyrus script) are MIT.
+Built on CommonLibSSE-NG (alandtse), SKSE Menu Framework, spdlog, fmt, toml++ and DirectXTK (see THIRD_PARTY_NOTICES). The morph mods above belong to their authors and are required, not included.
