@@ -48,7 +48,7 @@ namespace
 
 extern "C" __declspec(dllexport) constinit SKSE::PluginVersionData SKSEPlugin_Version = []() {
 	SKSE::PluginVersionData v{};
-	v.PluginVersion({ 0, 2, 0, 0 });
+	v.PluginVersion({ 0, 2, 1, 0 });
 	v.PluginName("FaceLab");
 	v.AuthorName("Bolescothegoat");
 	v.UsesAddressLibrary();
@@ -63,7 +63,7 @@ extern "C" __declspec(dllexport) bool SKSEPlugin_Query(const SKSE::QueryInterfac
 {
 	a_info->infoVersion = SKSE::PluginInfo::kVersion;
 	a_info->name = "FaceLab";
-	a_info->version = REL::Version(0, 2, 0, 0).pack();
+	a_info->version = REL::Version(0, 2, 1, 0).pack();
 	return true;
 }
 
@@ -71,7 +71,7 @@ SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
 	InitLogging();
 	SKSE::Init(a_skse);
-	logger::info("FaceLab 0.2.0 loaded, runtime {}", REL::Module::get().version().string());
+	logger::info("FaceLab 0.2.1 loaded, runtime {}", REL::Module::get().version().string());
 	SKSE::GetMessagingInterface()->RegisterListener(OnMessage);
 	SKSE::GetPapyrusInterface()->Register(FaceLab::Api::RegisterPapyrus);
 	return true;

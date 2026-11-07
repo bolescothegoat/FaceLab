@@ -32,6 +32,7 @@ std::vector<float>           base;
 			mutable std::vector<float>   mouthMask;  // 0..1 per vertex: how much the lips / mouth region moves for the phoneme morphs (oral mode)
 			mutable bool                 maskDone{ false };  // the file's base vertices (3 floats per vertex): used to tell apart face parts that have the same vertex count
 			std::map<std::string, Deltas> morphs;  // "BigAah" -> offsets (the EXPR_ prefix is dropped)
+			mutable std::map<const Deltas*, std::vector<std::uint32_t>> nonZero;  // per morph: the vertices it actually moves (built on first use; only touched under g_mx)
 		};
 
 		const char* kRoot = "Data/Meshes/actors/character/facegenmorphs/morphs/";  // the expression files indexed for face parts that are in no family list
@@ -420,6 +421,7 @@ std::vector<float>           base;
 			std::vector<float> lastOut;  // the live positions right after our last write
 			void*              dyn{ nullptr };  // the live vertex buffer this record was made for: a different one means the shape was rebuilt (or its address reused)
 			float*             fod{ nullptr };  // base vertices: the shape's 'FOD' extra data, 3 floats per vertex
+			const void*        fodExtra{ nullptr };  // the 'FOD' extra-data object that fod was read from (validated once; see FindFodFast)
 			float*             fmd{ nullptr };  // the second copy found under 'FMD'
 			bool               looked{ false };
 			bool               fodWorks{ true };  // the engine builds the face from the patched base (learned at its first rewrite)
@@ -466,6 +468,24 @@ float                                    gazeFade{ 0.05f };
 			return GetSettings().debug;
 		}
 
+		// ---- profile: where the time of one face update goes. Only measured while Debug tools is ticked, printed with the 30 s perf line. ----
+		enum Sec : int { kSecApply, kSecExpand, kSecShapes, kSecSetFor, kSecWant, kSecFod, kSecApplyLoop, kSecNodes, kSecLockWait, kSecCount };
+		std::atomic<std::uint64_t> g_secUs[kSecCount], g_secN[kSecCount];
+		struct SecTimer
+		{
+			int                                   i;
+			bool                                  on;
+			std::chrono::steady_clock::time_point t0;
+			explicit SecTimer(int a_i) : i(a_i), on(Chatty()) { if (on) { t0 = std::chrono::steady_clock::now(); } }
+			~SecTimer()
+			{
+				if (on) {
+					g_secUs[i] += static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count());
+					++g_secN[i];
+				}
+			}
+		};
+
 		std::atomic<float> g_poke{ 0.0f };
 		std::atomic<bool> g_bump{ false };  // patch the FMD copy too: debug only, off. (It was true once and corrupted engine memory when the API path never switched it off.)
 		std::atomic<int>  g_dbg{ 0 };  // how many more diagnostic lines to write
@@ -487,8 +507,12 @@ float                                    gazeFade{ 0.05f };
 		}
 
 		// FOD extra data: +0x18 -> float3 base vertices, +0x20 -> vertex count (found by probing a real head)
-		float* FindFod(RE::BSDynamicTriShape* ds, std::size_t nv)
+		float* FindFod(RE::BSDynamicTriShape* ds, std::size_t nv, const void** a_extraOut = nullptr)
 		{
+			SecTimer sec(kSecFod);
+			if (a_extraOut) {
+				*a_extraOut = nullptr;
+			}
 			auto* e = ds->GetExtraData("FOD");
 			if (!e || !Readable(e, 0x30)) {
 				return nullptr;
@@ -498,7 +522,29 @@ float                                    gazeFade{ 0.05f };
 			if (cnt != nv || !Readable(arr, nv * 12)) {
 				return nullptr;
 			}
+			if (a_extraOut) {
+				*a_extraOut = e;
+			}
 			return arr;
+		}
+
+		// FindFod checks that the memory can be read with VirtualQuery, twice, and that call is slow in a big modded game (about 30 us each): it was 85% of everything FaceLab
+		// did per face update, because the 'was this shape rebuilt?' check runs for every shape on every update. Once a base array has been found and checked, the same
+		// extra-data object holding the same array pointer and count is the same array: compare those three numbers and skip the memory probing. Anything different goes
+		// through the full, careful FindFod again.
+		float* FindFodFast(RE::BSDynamicTriShape* ds, std::size_t nv, const ShapeState& st)
+		{
+			if (st.fod && st.fodExtra) {
+				const auto* e = ds->GetExtraData("FOD");
+				if (e == st.fodExtra) {
+					auto*      arr = *reinterpret_cast<float* const*>(reinterpret_cast<const char*>(e) + 0x18);
+					const auto cnt = *reinterpret_cast<const std::uint32_t*>(reinterpret_cast<const char*>(e) + 0x20);
+					if (arr == st.fod && cnt == nv) {
+						return st.fod;
+					}
+				}
+			}
+			return FindFod(ds, nv);
 		}
 
 		// FMD extra data: +0x18 -> object, +0x10 -> object, +0x48 -> float3 vertices
@@ -693,6 +739,22 @@ float                                    gazeFade{ 0.05f };
 			return t.mouthMask;
 		}
 
+		// The vertices a morph actually moves. Most morphs touch a small part of the head (the eyes, the lips), so building an offset from just those is far cheaper than
+		// walking every vertex of the head for every active channel.
+		const std::vector<std::uint32_t>& NonZeroVerts(const TriSet& t, const Deltas& m)
+		{
+			if (const auto it = t.nonZero.find(&m); it != t.nonZero.end()) {
+				return it->second;
+			}
+			auto& list = t.nonZero[&m];
+			for (std::size_t v = 0; v < m.size() / 3; ++v) {
+				if (m[v * 3] != 0.0f || m[v * 3 + 1] != 0.0f || m[v * 3 + 2] != 0.0f) {
+					list.push_back(static_cast<std::uint32_t>(v));
+				}
+			}
+			return list;
+		}
+
 		std::vector<std::pair<std::string, float>> Expand(const std::map<std::string, float>& cur, RE::Actor* actor, const OralCtx& oc)
 {
 			std::vector<std::pair<std::string, float>> out;
@@ -802,6 +864,7 @@ out.push_back({ "BigAah", assist - have });
 		// Adds the change in offsets (delta) to the live mesh AND to the engine's base vertices (FOD), so the engine's own rewrites and uploads carry them.
 		void Apply(RE::Actor* a, ActorState& as, bool anyNonZero)
 		{
+			SecTimer secApply(kSecApply);
 OralCtx oc;
 			if (const auto o = as.cur.find("OralMode"); o != as.cur.end() && o->second >= 0.5f) {
 				oc.on = true;
@@ -849,7 +912,7 @@ OralCtx oc;
 					break;
 				}
 			}
-			const auto expanded = Expand(Merged(as), a, oc);  // the same for every shape of this face: once per pass, not once per shape
+			const auto expanded = [&]() { SecTimer sec(kSecExpand); return Expand(Merged(as), a, oc); }();  // the same for every shape of this face: once per pass, not once per shape
 			const float pz = g_poke.load();
 			float sideMax[2]{ 0.0f, 0.0f };
 			int   sideN[2]{ 0, 0 };
@@ -857,9 +920,11 @@ OralCtx oc;
 			if (kEyeWatch) {
 				WatchWeights(a, as, expanded);
 			}
-			const auto faceShapes = FaceShapes(a);
-			int        passFam = -1;
+			std::vector<RE::BSDynamicTriShape*> faceShapes;
+			int                                 passFam = -1;
 			{
+				SecTimer         sec(kSecShapes);
+				faceShapes = FaceShapes(a);
 				std::vector<int> counts;
 				for (auto* fs : faceShapes) {
 					counts.push_back(static_cast<int>(fs->GetDynamicTrishapeRuntimeData().dataSize / 16));
@@ -872,7 +937,7 @@ OralCtx oc;
 				if (!rd.dynamicData) {
 					continue;
 				}
-				const TriSet* set = SetFor(passFam, ds, static_cast<int>(nv), static_cast<const float*>(rd.dynamicData));
+				const TriSet* set = [&]() { SecTimer sec(kSecSetFor); return SetFor(passFam, ds, static_cast<int>(nv), static_cast<const float*>(rd.dynamicData)); }();
 				if (!set) {
 					continue;
 				}
@@ -891,8 +956,14 @@ OralCtx oc;
 							}
 							// oral scene: everything that is not a mouth channel (the emotions) leaves the lips alone
 							const float* mk = oc.on && !IsMouthMorph(name) ? MouthMask(*set).data() : nullptr;
-							for (std::size_t i = 0; i < nv * 3; ++i) {
-								want[i] += (*m)[i] * w * (mk ? 1.0f - mk[i / 3] : 1.0f);
+							for (const auto v : NonZeroVerts(*set, *m)) {
+								if (v >= nv) {
+									break;
+								}
+								const float k = mk ? 1.0f - mk[v] : 1.0f;
+								for (std::size_t q = 0; q < 3; ++q) {
+									want[v * 3 + q] += (*m)[v * 3 + q] * w * k;
+								}
 							}
 						}
 						if (pz != 0.0f) {
@@ -902,6 +973,7 @@ OralCtx oc;
 						}
 					};
 					if (!reuse) {
+						SecTimer sec(kSecWant);
 						buildWant();
 					}
 					if (st.applied.size() != nv * 3) {
@@ -912,7 +984,7 @@ OralCtx oc;
 				auto*               d = static_cast<float*>(rd.dynamicData);
 				// A shape that was rebuilt (a scene ended and the engine redressed / refreshed the face) can land at the same address as the old one. Our record of what
 				// offset is "inside" it would then be wrong, and fading the face out would subtract an offset that is not there. A new vertex buffer or a new base array = start over.
-				if (st.looked && (st.dyn != rd.dynamicData || st.fod != FindFod(ds, nv))) {
+				if (st.looked && (st.dyn != rd.dynamicData || st.fod != FindFodFast(ds, nv, st))) {
 					if (Chatty()) logger::info("Morph: '{}' was rebuilt by the engine (buffer {:p} -> {:p}): starting its record over", ds->name.c_str(), st.dyn, rd.dynamicData);
 st = ShapeState{};
 					if (side >= 0) {
@@ -932,14 +1004,17 @@ st = ShapeState{};
 					if (hadLooked) {
 						as.rebuilt = true;  // a new shape object for an actor we already knew: the face was rebuilt (same bridge as the same-address case below)
 					}
-					st.fod = FindFod(ds, nv);
+					st.fod = FindFod(ds, nv, &st.fodExtra);
 					st.fodWorks = st.fod != nullptr;  // decided here and never changed: with a patched base array the engine's own rewrites already contain our offsets
 					st.fmd = g_bump.load() ? FindFmd(ds, nv) : nullptr;  // g_bump is now the menu's "also patch the FMD copy" switch
 					if (Chatty()) logger::info("Morph: base arrays of '{}' ({} verts): FOD {:p}, FMD {:p}", ds->name.c_str(), nv, static_cast<void*>(st.fod), static_cast<void*>(st.fmd));
 				}
 
-				// did the engine rewrite the mesh since our last write? then see whether it built it from the patched base
-				if (st.lastOut.size() == nv * 3) {
+				// did the engine rewrite the mesh since our last write? then see whether it built it from the patched base.
+				// With a patched base array (the normal case) the answer changes nothing the player can see: it only feeds the first few log lines. So the whole-mesh
+				// compare (and the copy of the output that it needs) is only done when it matters; it used to run for every shape on every update.
+				const bool needDetect = !st.fodWorks || side >= 0 || (Chatty() && st.verdicts < 8);
+				if (needDetect && st.lastOut.size() == nv * 3) {
 					bool rewritten = false;
 					for (std::size_t v = 0; v < nv && !rewritten; ++v) {
 						for (std::size_t q = 0; q < 3; ++q) {
@@ -992,6 +1067,7 @@ st = ShapeState{};
 				}
 				// apply the change (when the inputs are unchanged, 'want' would equal 'applied': every delta is zero, so the pass is skipped)
 				if (!reuse) {
+					SecTimer secLoop(kSecApplyLoop);
 					for (std::size_t v = 0; v < nv; ++v) {
 						for (std::size_t q = 0; q < 3; ++q) {
 							const float delta = want[v * 3 + q] - st.applied[v * 3 + q];
@@ -1025,11 +1101,16 @@ st = ShapeState{};
 						++g_side[side].changed;
 					}
 				}
-				st.lastOut.resize(nv * 3);
-				for (std::size_t v = 0; v < nv; ++v) {
-					for (std::size_t q = 0; q < 3; ++q) {
-						st.lastOut[v * 3 + q] = d[v * 4 + q];
+				if (needDetect) {
+					st.lastOut.resize(nv * 3);
+					for (std::size_t v = 0; v < nv; ++v) {
+						for (std::size_t q = 0; q < 3; ++q) {
+							st.lastOut[v * 3 + q] = d[v * 4 + q];
+						}
 					}
+				} else if (!st.lastOut.empty()) {
+					st.lastOut.clear();
+					st.lastOut.shrink_to_fit();
 				}
 			}
 			if (kEyeWatch && sideN[0] > 0 && sideN[1] > 0) {
@@ -1104,6 +1185,17 @@ st = ShapeState{};
 			if (Chatty() && active > 0 && fn > 0) {
 				logger::info("perf: FaceLab frame avg {:.0f} us (max {} us) over {} frames; face-update hook avg {:.0f} us (max {} us), {} calls ({:.0f}/s); {} characters shown; offset rebuild skipped on {} of {} shape passes",
 					static_cast<double>(fs) / static_cast<double>(fn), fm, fn, an ? static_cast<double>(as_) / static_cast<double>(an) : 0.0, am, an, static_cast<double>(an) / 30.0, active, pskip, pa);
+				{
+					std::uint64_t us[kSecCount], n[kSecCount];
+					for (int i = 0; i < kSecCount; ++i) {
+						us[i] = g_secUs[i].exchange(0);
+						n[i] = g_secN[i].exchange(0);
+					}
+					const auto avg = [&](int i) { return n[i] ? static_cast<double>(us[i]) / 1000.0 / static_cast<double>(n[i]) : 0.0; };  // microseconds per timed section
+					logger::info("profile (avg us per section; calls): Apply {:.0f} ({}) | expand {:.0f} | shapes+family {:.0f} | setfor {:.1f} ({}) | buildWant {:.0f} ({}) | FindFod {:.1f} ({}) | applyLoop {:.0f} ({}) | face nodes (Frame, per actor) {:.0f} ({}) | hook lock wait {:.0f} ({})",
+						avg(kSecApply), n[kSecApply], avg(kSecExpand), avg(kSecShapes), avg(kSecSetFor), n[kSecSetFor], avg(kSecWant), n[kSecWant], avg(kSecFod), n[kSecFod], avg(kSecApplyLoop), n[kSecApplyLoop],
+						avg(kSecNodes), n[kSecNodes], avg(kSecLockWait), n[kSecLockWait]);
+				}
 				if (kEyeWatch) {
 					const auto lp = g_side[0].passes.exchange(0), lr = g_side[0].rewritten.exchange(0), lx = g_side[0].resets.exchange(0), lc = g_side[0].changed.exchange(0);
 					const auto rp = g_side[1].passes.exchange(0), rr = g_side[1].rewritten.exchange(0), rx = g_side[1].resets.exchange(0), rc = g_side[1].changed.exchange(0);
@@ -1133,8 +1225,11 @@ PerfScope ps_{ g_perfFrame };
 					}
 					if (it->second.active) {
 it->second.female = a->GetActorBase() && a->GetActorBase()->GetSex() == RE::SEX::kFemale;
-						it->second.nodeA = a->GetFaceNode();
-						it->second.nodeB = a->GetFaceNodeSkinned();
+						{
+							SecTimer sec(kSecNodes);
+							it->second.nodeA = a->GetFaceNode();
+							it->second.nodeB = a->GetFaceNodeSkinned();
+						}
 						const bool nz = Ease(it->second, dt);
 						Apply(a, it->second, nz);
 					}
@@ -1185,7 +1280,11 @@ void AfterFaceUpdate(RE::BSFaceGenNiNode* self)
 					return;  // not one of ours: no lock, no work
 				}
 			}
-			std::lock_guard lk(g_mx);
+			std::unique_lock<std::mutex> lk(g_mx, std::defer_lock);
+			{
+				SecTimer sec(kSecLockWait);
+				lk.lock();
+			}
 			PerfScope ps_{ g_perfAfter };
 			if (g_act.empty()) {
 				return;

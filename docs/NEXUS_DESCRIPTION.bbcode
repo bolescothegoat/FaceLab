@@ -66,5 +66,9 @@ Open [font=Courier New]Documents/My Games/Skyrim Special Edition/SKSE/FaceLab.lo
 OStim scene mods (scene faces), tongue mods (TongueOut), The Fourth Wall (EyesCross, gaze), SMP physics and RaceMenu. Nothing is written to your save.
 
 [size=4][b]Licence and source[/b][/size]
-FaceLab is free software, [b]GPL-3.0-or-later[/b]. Source: [i](GitHub link)[/i]. The two API files (C++ header and Papyrus script) are MIT.
+FaceLab is free software, [b]GPL-3.0-or-later[/b]. Source: [url=https://github.com/bolescothegoat/FaceLab]github.com/bolescothegoat/FaceLab[/url]. The two API files (C++ header and Papyrus script) are MIT.
 Built on CommonLibSSE-NG (alandtse), SKSE Menu Framework, spdlog, fmt, toml++ and DirectXTK (see THIRD_PARTY_NOTICES). The morph mods above belong to their authors and are required, not included.
+
+[size=4][b]Changelog[/b][/size]
+[b]0.2.1[/b] - Faster: a face update is about five times cheaper (a memory check that ran on every update is now done once), so FaceLab costs a fraction of a millisecond per frame even with several characters. Faces look exactly as before.
+[b]0.2.0[/b] - First public release.
