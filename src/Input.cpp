@@ -31,6 +31,10 @@ namespace FaceLab::Input
 			case Capture::KbMod: s.kbMod = code; break;
 			case Capture::PadKey: s.padKey = code; break;
 			case Capture::PadMod: s.padMod = code; break;
+			case Capture::TongueKbKey: s.tKbKey = code; break;
+			case Capture::TongueKbMod: s.tKbMod = code; break;
+			case Capture::TonguePadKey: s.tPadKey = code; break;
+			case Capture::TonguePadMod: s.tPadMod = code; break;
 			default: return;
 			}
 			SaveConfig();
@@ -64,7 +68,7 @@ namespace FaceLab::Input
 
 					const Capture cap = g_capture.load();
 					if (cap != Capture::None && b->IsDown()) {
-						const bool wantPad = cap == Capture::PadKey || cap == Capture::PadMod;
+						const bool wantPad = cap == Capture::PadKey || cap == Capture::PadMod || cap == Capture::TonguePadKey || cap == Capture::TonguePadMod;
 						if (wantPad == pad) {
 							g_capture = Capture::None;
 							if (!(kb && code == kEscape)) {
@@ -83,16 +87,16 @@ namespace FaceLab::Input
 					if (!b->IsDown() || cap != Capture::None || !s.enabled || MenuBlocksInput()) {
 						continue;
 					}
-					const int  key = pad ? s.padKey : s.kbKey;
-					const int  mod = pad ? s.padMod : s.kbMod;
-					const bool haveMod = pad ? mod > 0 : mod >= 0;
-					if (key <= 0 || code != key) {
-						continue;
+					const auto fires = [&](int key, int mod) {
+						const bool haveMod = pad ? mod > 0 : mod >= 0;
+						return key > 0 && code == key && (!haveMod || held.contains(mod));
+					};
+					if (fires(pad ? s.padKey : s.kbKey, pad ? s.padMod : s.kbMod)) {
+						OnHotkey();
+					} else if (fires(pad ? s.tPadKey : s.tKbKey, pad ? s.tPadMod : s.tKbMod)) {
+						ToggleTongue();
+						RE::SendHUDMessage::ShowHUDMessage("FaceLab: tongue toggled");
 					}
-					if (haveMod && !held.contains(mod)) {
-						continue;
-					}
-					OnHotkey();
 				}
 				return RE::BSEventNotifyControl::kContinue;
 			}
@@ -116,6 +120,123 @@ namespace FaceLab::Input
 	Capture CurrentCapture()
 	{
 		return g_capture.load();
+	}
+
+	namespace
+	{
+		struct XState
+		{
+			DWORD dwPacketNumber;
+			WORD  wButtons;
+			BYTE  bLeftTrigger, bRightTrigger;
+			SHORT sThumbLX, sThumbLY, sThumbRX, sThumbRY;
+		};
+		using XGetState = DWORD(WINAPI*)(DWORD, XState*);
+
+		XGetState GetXInput()
+		{
+			static XGetState fn = []() -> XGetState {
+				for (const char* dll : { "xinput1_4.dll", "xinput1_3.dll", "xinput9_1_0.dll" }) {
+					if (const auto m = ::LoadLibraryA(dll)) {
+						if (const auto p = ::GetProcAddress(m, "XInputGetState")) {
+							return reinterpret_cast<XGetState>(p);
+						}
+					}
+				}
+				return nullptr;
+			}();
+			return fn;
+		}
+
+		bool          g_pollArmed = false;
+		bool          g_prevKey[256]{};
+		WORD          g_prevPad = 0;
+
+		bool GameHasFocus()
+		{
+			DWORD pid = 0;
+			::GetWindowThreadProcessId(::GetForegroundWindow(), &pid);
+			return pid == ::GetCurrentProcessId();
+		}
+
+		WORD PadNow()
+		{
+			XState st{};
+			if (const auto fn = GetXInput()) {
+				for (DWORD i = 0; i < 4; ++i) {
+					if (fn(i, &st) == 0) {
+						return st.wButtons;
+					}
+				}
+			}
+			return 0;
+		}
+	}
+
+	void PollCapture()
+	{
+		const Capture cap = g_capture.load();
+		if (cap == Capture::None) {
+			g_pollArmed = false;
+			return;
+		}
+		if (!GameHasFocus()) {
+			return;
+		}
+		const bool wantPad = cap == Capture::PadKey || cap == Capture::PadMod || cap == Capture::TonguePadKey || cap == Capture::TonguePadMod;
+		if (wantPad) {
+			const WORD now = PadNow();
+			if (!g_pollArmed) {
+				g_pollArmed = true;
+				g_prevPad = now;  // what is held when the capture starts does not count
+				return;
+			}
+			const WORD fresh = static_cast<WORD>(now & ~g_prevPad);
+			g_prevPad = now;
+			if (fresh) {
+				WORD bit = 1;
+				while (!(fresh & bit)) {
+					bit = static_cast<WORD>(bit << 1);
+				}
+				g_capture = Capture::None;
+				Bind(cap, true, bit);
+				g_pollArmed = false;
+			}
+			return;
+		}
+		if (!g_pollArmed) {
+			g_pollArmed = true;
+			for (int vk = 8; vk < 255; ++vk) {
+				g_prevKey[vk] = (::GetAsyncKeyState(vk) & 0x8000) != 0;
+			}
+			return;
+		}
+		for (int vk = 8; vk < 255; ++vk) {
+			if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU || vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON || vk == VK_XBUTTON1 || vk == VK_XBUTTON2) {
+				continue;  // the left / right versions of the modifiers are looked at on their own; the mouse buttons are the menu's
+			}
+			const bool down = (::GetAsyncKeyState(vk) & 0x8000) != 0;
+			const bool fresh = down && !g_prevKey[vk];
+			g_prevKey[vk] = down;
+			if (!fresh) {
+				continue;
+			}
+			// virtual key -> DirectInput scan code (what the game's key events and our saved bindings use): extended keys carry 0x80
+			const UINT sc = ::MapVirtualKeyA(static_cast<UINT>(vk), MAPVK_VK_TO_VSC_EX);
+			int        dik = static_cast<int>(sc & 0xFF);
+			if ((sc & 0xFF00) == 0xE000) {
+				dik |= 0x80;
+			}
+			if (dik <= 0) {
+				continue;
+			}
+			g_capture = Capture::None;
+			if (dik != kEscape) {
+				Bind(cap, false, dik);
+			}
+			g_pollArmed = false;
+			return;
+		}
 	}
 
 	std::string KeyName(int dik)

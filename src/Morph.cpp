@@ -31,6 +31,9 @@ namespace FaceLab::Morph
 std::vector<float>           base;
 			mutable std::vector<float>   mouthMask;  // 0..1 per vertex: how much the lips / mouth region moves for the phoneme morphs (oral mode)
 			mutable bool                 maskDone{ false };  // the file's base vertices (3 floats per vertex): used to tell apart face parts that have the same vertex count
+			float                        eyeWMax[3]{ 0.0f, 0.0f, 0.0f };
+			bool                         ube{ false };  // UBE eye part: per-eye look channels get the UBE eye strengths
+			float                        lookDeg[2]{ 0.0f, 0.0f };  // add-on eye pack: largest weight of a per-eye look channel (sideways, up, down); 0 = no limit
 			std::map<std::string, Deltas> morphs;  // "BigAah" -> offsets (the EXPR_ prefix is dropped)
 			mutable std::map<const Deltas*, std::vector<std::uint32_t>> nonZero;  // per morph: the vertices it actually moves (built on first use; only touched under g_mx)
 		};
@@ -51,6 +54,9 @@ std::vector<float>           base;
 			t.nv = p.nv;
 			t.path = p.files.empty() ? std::string{} : p.files.front();
 			t.base = std::move(p.base);
+			std::copy(std::begin(p.eyeWMax), std::end(p.eyeWMax), std::begin(t.eyeWMax));
+			std::copy(std::begin(p.lookDeg), std::end(p.lookDeg), std::begin(t.lookDeg));
+			t.ube = p.ube;
 			for (auto& [name, dl] : p.morphs) {
 				t.morphs.emplace(name, std::move(dl));
 			}
@@ -257,7 +263,8 @@ std::vector<float>           base;
 				}
 			}
 			const TriSet* best = nullptr;
-			double        bestDist = 1e30;
+			const TriSet* bestU = nullptr;
+			double        bestDist = 1e30, bestUDist = 1e30;
 			// the file's vertices and the live ones can sit in different origins (a beard is ~120 units off): compare the shapes around their own centres
 			double cx = 0.0, cy = 0.0, cz = 0.0;
 			for (int v = 0; v < nv; ++v) {
@@ -278,17 +285,31 @@ std::vector<float>           base;
 				bx /= nv;
 				by /= nv;
 				bz /= nv;
-				double sum = 0.0;
+				double sum = 0.0, usum = 0.0;
 				for (int v = 0; v < nv; ++v) {
 					const double dx = (c->base[static_cast<std::size_t>(v) * 3] - bx) - (d[v * 4] - cx), dy = (c->base[static_cast<std::size_t>(v) * 3 + 1] - by) - (d[v * 4 + 1] - cy),
 					             dz = (c->base[static_cast<std::size_t>(v) * 3 + 2] - bz) - (d[v * 4 + 2] - cz);
 					sum += std::sqrt(dx * dx + dy * dy + dz * dz);
+					// the same without removing the centres: tells apart parts that have the same shape in different places (a left and a right eye lens, a male and a female file)
+					const double ux = c->base[static_cast<std::size_t>(v) * 3] - d[v * 4], uy = c->base[static_cast<std::size_t>(v) * 3 + 1] - d[v * 4 + 1], uz = c->base[static_cast<std::size_t>(v) * 3 + 2] - d[v * 4 + 2];
+					usum += std::sqrt(ux * ux + uy * uy + uz * uz);
 				}
 				sum /= nv;
+				usum /= nv;
 				if (sum < bestDist) {
 					bestDist = sum;
 					best = c.get();
 				}
+				if (usum < bestUDist) {
+					bestUDist = usum;
+					bestU = c.get();
+				}
+			}
+			// when a candidate lies in the shape's own frame (head-space parts: eyes, lenses), the nearest one in place wins. Parts in another frame (a beard ~120 units off)
+			// keep the centred comparison.
+			if (bestU && bestUDist < 3.0) {
+				best = bestU;
+				bestDist = bestUDist;
 			}
 			if (best && bestDist < 6.0) {
 				logger::info("Morph: face part '{}' ({} verts) uses {} (mean distance of the base vertices {:.2f})", shapeName, nv, best->path, bestDist);
@@ -377,6 +398,36 @@ std::vector<float>           base;
 				return c->second;
 			}
 			bool          pending = false;
+			// Dev aid: Data/SKSE/Plugins/FaceLab/SkipShapes.txt, words separated by spaces or new lines. A face shape whose name contains one of them (any case) is left alone, so a
+			// shape that misbehaves with a gaze can be found by leaving shapes out one at a time. Read once at start.
+			// Built in: the shell shapes of Advanced Eyes Addon (a black shadow band that belongs under the lid, and a cornea layer). They are concentric with the eyeball, so they
+			// look right standing still, while turning them with the gaze swings the black band out of the eye and tilts the shell out of its socket. The eyeball and the iris lenses
+			// are not in this list: they are what turns.
+			static const std::vector<std::string> skipWords = []() {
+				std::vector<std::string> w{ "eye_shadow", "eye_outer" };
+				std::ifstream            f("Data/SKSE/Plugins/FaceLab/SkipShapes.txt");
+				std::string              s;
+				while (f && (f >> s)) {
+					for (auto& c : s) {
+						c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+					}
+					w.push_back(s);
+				}
+				logger::info("face shapes left alone (name contains one of {} word(s): eye_shadow, eye_outer, plus Data/SKSE/Plugins/FaceLab/SkipShapes.txt)", w.size());
+				return w;
+			}();
+			if (!skipWords.empty()) {
+				std::string low = ds->name.c_str();
+				for (auto& c : low) {
+					c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+				}
+				for (const auto& w : skipWords) {
+					if (low.find(w) != std::string::npos) {
+						cache[key] = nullptr;
+						return nullptr;
+					}
+				}
+			}
 			const TriSet* r = ResolveDynamic(nv, d, ds->name.c_str(), pending);
 			if (!pending) {
 				if (cache.size() > 4000) {
@@ -430,6 +481,9 @@ std::vector<float>           base;
 			std::vector<std::pair<std::string, float>> key;
 			const void*        keySet{ nullptr };
 			bool               keyOral{ false };
+			float              keyLid{ 1.0f };
+			float              keyUbe{ 0.0f };
+			float              keyVert{ 0.0f };
 			float              keyPoke{ 0.0f };
 			bool               haveKey{ false };
 		};
@@ -487,6 +541,12 @@ float                                    gazeFade{ 0.05f };
 		};
 
 		std::atomic<float> g_poke{ 0.0f };
+		std::atomic<float> g_ubeSide{ 2.0f }, g_ubeDown{ 1.5f }, g_ubeUp{ 0.2f };  // see Morph::SetUbeEyes
+		std::atomic<float> g_lidFollow{ 1.5f };  // see Morph::SetLidFollow (the Eye assist's lid slider, 0..2.5)
+		std::atomic<long long> g_tonguePollAt{ 0 };  // steady-clock ms of the last Tongue() call
+		std::atomic<float> g_shadowStrength{ 0.25f };  // see Morph::SetShadowStrength
+		bool               g_shadowTouched = false;  // we have set a shadow shell's alpha at some point (so 100% puts it back)
+		std::atomic<float> g_vertLimit{ 26.0f };  // degrees: the most an add-on eyeball may turn up or down in total (see Morph::SetVertLimit)
 		std::atomic<bool> g_bump{ false };  // patch the FMD copy too: debug only, off. (It was true once and corrupted engine memory when the API path never switched it off.)
 		std::atomic<int>  g_dbg{ 0 };  // how many more diagnostic lines to write
 
@@ -618,6 +678,31 @@ float                                    gazeFade{ 0.05f };
 				v = std::clamp(v + c, -3.0f, 3.0f);
 			}
 			return out;
+		}
+
+		// the add-on eyes' shadow shell: its opacity is scaled by the strength setting (the engine multiplies the texture's alpha by the material alpha)
+		void ApplyShadowStrength(const std::vector<RE::BSDynamicTriShape*>& shapes)
+		{
+			const float k = g_shadowStrength.load();
+			if (k >= 0.999f && !g_shadowTouched) {
+				return;
+			}
+			for (auto* ds : shapes) {
+				std::string n = ds->name.c_str();
+				for (auto& c : n) {
+					c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+				}
+				if (n.find("eye_shadow") == std::string::npos) {
+					continue;
+				}
+				auto* prop = ds->lightingShaderProp_cast();
+				auto* mat = prop ? static_cast<RE::BSLightingShaderMaterialBase*>(prop->material) : nullptr;
+				if (!mat || std::fabs(mat->materialAlpha - k) < 0.002f) {
+					continue;
+				}
+				prop->SetMaterialAlpha(k);
+				g_shadowTouched = true;
+			}
 		}
 
 		// the actor has two face nodes: GetFaceNode() and GetFaceNodeSkinned() (the one that is drawn, skinned to the head bones). Shape pointers from both.
@@ -931,6 +1016,20 @@ OralCtx oc;
 				}
 				passFam = FamilyOf(as.female, counts);
 			}
+			ApplyShadowStrength(faceShapes);
+			// an add-on eye pack on this head? (then the head's own lids are eased, see lidK below)
+			bool packOnHead = false;
+			for (auto* ds : faceShapes) {
+				auto&      rd = ds->GetDynamicTrishapeRuntimeData();
+				const auto n = static_cast<std::size_t>(rd.dataSize / 16);
+				if (!rd.dynamicData) {
+					continue;
+				}
+				if (const TriSet* t = SetFor(passFam, ds, static_cast<int>(n), static_cast<const float*>(rd.dynamicData)); t && t->eyeWMax[0] > 0.0f) {
+					packOnHead = true;
+					break;
+				}
+			}
 			for (auto* ds : faceShapes) {
 				auto&      rd = ds->GetDynamicTrishapeRuntimeData();
 				const auto nv = static_cast<std::size_t>(rd.dataSize / 16);
@@ -945,14 +1044,65 @@ OralCtx oc;
 				const int side = kEyeWatch ? EyeSide(ds->name.c_str()) : -1;
 
 					// the offset we want inside the shape now. Same inputs as the pass that built 'applied' = same offset: nothing to compute and nothing to write.
-					bool reuse = st.haveKey && st.keySet == set && st.keyOral == oc.on && st.keyPoke == pz && st.applied.size() == nv * 3 && st.key == expanded;
+					const float lidK = packOnHead && set->eyeWMax[0] <= 0.0f ? g_lidFollow.load() : 1.0f;  // the head's lids on a head with an eye pack
+					const float vertLim = g_vertLimit.load();
+					const float ubeK = g_ubeSide.load() + 7.1f * g_ubeDown.load() + 13.7f * g_ubeUp.load();
+					bool reuse = st.haveKey && st.keyLid == lidK && st.keyUbe == ubeK && st.keyVert == vertLim && st.keySet == set && st.keyOral == oc.on && st.keyPoke == pz && st.applied.size() == nv * 3 && st.key == expanded;
 					std::vector<float> want;
 					const auto buildWant = [&]() {
 						want.assign(nv * 3, 0.0f);
-						for (const auto& [name, w] : expanded) {
+						// An add-on eyeball is a cap: turned far up or down its dark rim comes into the lid opening as a thick dark line. The TOTAL vertical turn of each eye (the look and the turn
+						// channels add) is held to the vertical limit by scaling both channels together.
+						float vk[2][2] = { { 1.0f, 1.0f }, { 1.0f, 1.0f } };  // [eye: left, right][0 = up, 1 = down]
+						if (set->eyeWMax[0] > 0.0f && vertLim > 0.0f) {
+							const auto get = [&](const char* nm) {
+								for (const auto& [k, v] : expanded) {
+									if (k == nm) {
+										return std::max(0.0f, v);
+									}
+								}
+								return 0.0f;
+							};
+							const char* const eyes[2] = { "EyeLeft", "EyeRight" };
+							for (int e = 0; e < 2; ++e) {
+								const std::string p = eyes[e];
+								const float up = get((p + "LookUp").c_str()) * set->lookDeg[0] + get((p + "TurnUp").c_str()) * 10.0f;
+								const float dn = get((p + "LookDown").c_str()) * set->lookDeg[1] + get((p + "TurnDown").c_str()) * 10.0f;
+								if (up > vertLim) {
+									vk[e][0] = vertLim / up;
+								}
+								if (dn > vertLim) {
+									vk[e][1] = vertLim / dn;
+								}
+							}
+						}
+						for (const auto& [name, w0] : expanded) {
 							const Deltas* m = FindMorph(*set, name);
 							if (!m) {
 								continue;
+							}
+							float w = w0;
+							if (set->ube && name.size() > 11 && (name.rfind("EyeLeftLook", 0) == 0 || name.rfind("EyeRightLook", 0) == 0)) {
+								const std::string_view dir = std::string_view(name).substr(name.rfind("Look") + 4);
+								w *= dir == "Up" ? g_ubeUp.load() : (dir == "Down" ? g_ubeDown.load() : g_ubeSide.load());  // the UBE eyes' look channels are built at unit strength
+							}
+							if (set->eyeWMax[0] > 0.0f && name.rfind("Eye", 0) == 0) {
+								const int e = name.rfind("EyeLeft", 0) == 0 ? 0 : (name.rfind("EyeRight", 0) == 0 ? 1 : -1);
+								if (e >= 0) {
+									if (name.ends_with("LookUp") || name.ends_with("TurnUp")) {
+										w *= vk[e][0];
+									} else if (name.ends_with("LookDown") || name.ends_with("TurnDown")) {
+										w *= vk[e][1];
+									}
+								}
+							}
+							if (lidK != 1.0f && (name == "EyeLeftLookUp" || name == "EyeLeftLookDown" || name == "EyeRightLookUp" || name == "EyeRightLookDown")) {
+								w *= lidK;  // the lids follow a vertical look less: a stock lid is built for a stock eye
+							}
+							if (set->eyeWMax[0] > 0.0f && name.size() > 11 && (name.rfind("EyeLeftLook", 0) == 0 || name.rfind("EyeRightLook", 0) == 0)) {
+								const std::string_view dir = std::string_view(name).substr(name.rfind("Look") + 4);
+								const float            cap = dir == "Up" ? set->eyeWMax[1] : (dir == "Down" ? set->eyeWMax[2] : set->eyeWMax[0]);
+								w = std::clamp(w, -cap, cap);
 							}
 							// oral scene: everything that is not a mouth channel (the emotions) leaves the lips alone
 							const float* mk = oc.on && !IsMouthMorph(name) ? MouthMask(*set).data() : nullptr;
@@ -1090,6 +1240,9 @@ st = ShapeState{};
 					st.key = expanded;
 					st.keySet = set;
 					st.keyOral = oc.on;
+					st.keyLid = lidK;
+					st.keyUbe = ubeK;
+					st.keyVert = vertLim;
 					st.keyPoke = pz;
 					st.haveKey = true;
 				}
@@ -1408,6 +1561,18 @@ void AfterFaceUpdate(RE::BSFaceGenNiNode* self)
 		if (it == g_act.end()) {
 			return -1.0f;
 		}
+		{  // no face value left (a gaze layer alone keeps her 'active', and a faded face never reaches exactly 0): the mouth is the scene's again
+			bool any = false;
+			for (const auto& [n, w] : it->second.cur) {
+				if (std::fabs(w) > 0.05f) {
+					any = true;
+					break;
+				}
+			}
+			if (!any) {
+				return -1.0f;
+			}
+		}
 		float m = 0.0f;
 		for (const char* n : { "Aah", "BigAah", "Eh", "Oh" }) {
 			if (const auto c = it->second.cur.find(n); c != it->second.cur.end()) {
@@ -1417,15 +1582,42 @@ void AfterFaceUpdate(RE::BSFaceGenNiNode* self)
 		return m;
 	}
 
+	long long TonguePolledMsAgo()
+	{
+		const auto at = g_tonguePollAt.load();
+		if (at == 0) {
+			return -1;
+		}
+		return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() - at;
+	}
+
 	float Tongue(RE::FormID id)
 	{
+		g_tonguePollAt = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 		std::lock_guard lk(g_mx);
 		const auto      it = g_act.find(id);
 		if (it == g_act.end()) {
 			return -1.0f;
 		}
-		const auto c = it->second.cur.find("TongueOut");
-		return c == it->second.cur.end() ? 0.0f : std::max(0.0f, c->second);
+		// the face's own TongueOut, or the one an assist layer (the Lab's Tongue assist) holds on top of it: the larger counts
+		float       v = 0.0f;
+		const auto  c = it->second.cur.find("TongueOut");
+		if (c != it->second.cur.end()) {
+			v = std::max(v, c->second);
+		}
+		if (const auto g = it->second.gazeCur.find("TongueOut"); g != it->second.gazeCur.end()) {
+			v = std::max(v, g->second);
+		}
+		// log when a tongue request is first read (so a log shows both that the request reached FaceLab and that a tongue mod is reading it)
+		static std::set<RE::FormID> asking;
+		if (v > 0.05f) {
+			if (asking.insert(id).second) {
+				logger::info("TongueOut {:.2f} on {:08X} is being read by a tongue mod", v, id);
+			}
+		} else {
+			asking.erase(id);
+		}
+		return v;
 	}
 
 	float EyeControl(RE::FormID id)
@@ -1555,6 +1747,62 @@ void AfterFaceUpdate(RE::BSFaceGenNiNode* self)
 				}
 			});
 		}).detach();
+	}
+
+	std::vector<std::string> FaceShapeNames(RE::Actor* actor)
+	{
+	std::set<std::string> names;
+	if (actor) {
+		for (auto* ds : FaceShapes(actor)) {
+			names.insert(ds->name.c_str());
+		}
+	}
+	return { names.begin(), names.end() };
+	}
+
+	void CullFaceShapes(RE::Actor* actor, const std::set<std::string>& hide)
+	{
+	static std::set<RE::BSDynamicTriShape*> culledByUs;  // game thread only
+	if (!actor) {
+		return;
+	}
+	for (auto* ds : FaceShapes(actor)) {
+		if (hide.contains(ds->name.c_str())) {
+			ds->SetAppCulled(true);
+			culledByUs.insert(ds);
+		} else if (culledByUs.erase(ds) > 0) {
+			ds->SetAppCulled(false);
+		}
+	}
+	}
+
+	void SetShadowStrength(float k)
+	{
+	g_shadowStrength = std::clamp(k, 0.0f, 1.0f);
+	}
+
+	void SetVertLimit(float degrees)
+	{
+	g_vertLimit = std::clamp(degrees, 4.0f, 60.0f);
+	}
+
+	void SetUbeEyes(float side, float down, float up)
+	{
+		g_ubeSide = std::clamp(side, 0.0f, 8.0f);
+		g_ubeDown = std::clamp(down, 0.0f, 8.0f);
+		g_ubeUp = std::clamp(up, 0.0f, 8.0f);
+	}
+
+	// The menu shows the UBE eye strengths as a % change from the calibrated look (0 = as shipped, -100 = off, +100 = twice as strong).
+	// The calibrated look (found live on a UBE head, 2026-11-08): sideways 2.0, down 1.5, up 0.2 of the unit channel.
+	void SetUbeAdjust(int sidePct, int downPct, int upPct)
+	{
+		SetUbeEyes(2.0f * (1.0f + static_cast<float>(sidePct) / 100.0f), 1.5f * (1.0f + static_cast<float>(downPct) / 100.0f), 0.2f * (1.0f + static_cast<float>(upPct) / 100.0f));
+	}
+
+	void SetLidFollow(float k)
+	{
+	g_lidFollow = std::clamp(k, 0.0f, 2.5f);
 	}
 
 	void SetBump(bool on)

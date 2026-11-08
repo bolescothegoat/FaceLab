@@ -402,6 +402,25 @@ namespace FaceLab::Api
 		SKSE::GetTaskInterface()->AddTask([id, owner = std::move(owner), w = std::move(w), fade, priority]() mutable { Put(id, owner, std::move(w), fade, priority); });
 	}
 
+	void SetAssist(RE::FormID id, std::string owner, Weights w, float fade)
+	{
+		std::lock_guard lk(g_gzMx);
+		g_gaze[id][std::move(owner)] = std::move(w);
+		PushGaze(id, fade);
+	}
+
+	void ClearAssist(RE::FormID id, std::string owner, float fade)
+	{
+		std::lock_guard lk(g_gzMx);
+		if (const auto it = g_gaze.find(id); it != g_gaze.end()) {
+			it->second.erase(owner);
+			if (it->second.empty()) {
+				g_gaze.erase(it);
+			}
+		}
+		PushGaze(id, fade);
+	}
+
 	bool ApplyPreset(RE::FormID id, std::string owner, std::string_view preset, float fade, int priority)
 	{
 		const auto p = Presets::Resolve(preset);

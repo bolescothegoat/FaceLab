@@ -1,4 +1,4 @@
-# FaceLab - source code and build instructions (version 0.2.0)
+# FaceLab - source code and build instructions (version 0.2.2)
 
 Free software under the GNU GPL v3 or later (see `LICENSE`). Copyright (C) 2026 Bolescothegoat.
 Only the two interface files in `api/` (`FaceLabAPI.h`, `FaceLab.psc`) are under the MIT licence (`api/LICENSE-MIT.txt`), so other mods can use them whatever their own licence.
@@ -20,6 +20,7 @@ Built with AI assistance (Claude, by Anthropic) from the author's designs and in
 | `src/FamilyLoad.h`, `src/FamilyLoad.cpp` | Loads a family's face parts, merges files, adds per-eye morphs, makes the UBE mouth / brows / lashes follow the head |
 | `src/Lab.h`, `src/Lab.cpp`, `src/Menu.cpp` | The in-game lab (SKSE Menu Framework pages), settings |
 | `src/Presets.h`, `src/Presets.cpp` | Preset files (`Data/SKSE/Plugins/FaceLab/Presets/*.toml`) |
+| `src/Scenes.h`, `src/Scenes.cpp` | Scene rules: when an OStim or SexLab scene starts, changes or reaches an orgasm, applies the preset a rule names (`Data/SKSE/Plugins/FaceLab/Scenes/*.toml`, see `docs/SCENE_RULES.md`) |
 | `src/Api.h`, `src/Api.cpp`, `src/Input.*` | Papyrus natives, the C interface other plugins use (`FaceLabAPI.h`), hotkeys |
 | `api/` | What other mods copy: `FaceLabAPI.h`, `FaceLab.psc`, a developer README |
 | `tests/` | Small console programs: the `.tri` reader, the family loader against a real load order, the UBE mouth check |

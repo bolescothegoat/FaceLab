@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <set>
+
 #include "PCH.h"
 
 // Our own morph application, the way RaceMenu's skee does it, but live: the head's EXPR_* morph targets (read from the .tri files the High Poly Head ships)
@@ -36,7 +38,17 @@ namespace FaceLab::Morph
 	float EyeControl(RE::FormID id);
 	// The TongueOut weight of the face shown on this actor (live, faded), 0 or more; -1 = no face of ours. Any thread.
 	float Tongue(RE::FormID id);
+	// Milliseconds since anything last read Tongue() (a tongue mod does, every tick); -1 = never. Tells the menu whether a tongue mod is listening at all. Any thread.
+	long long TonguePolledMsAgo();
 	void Poke(RE::Actor* actor, float zUnits, float seconds);  // test: shift the whole face mesh up by zUnits for a few seconds
+	// Debug: the names of the actor's face shapes, and hiding some of them (to find which shape draws something wrong). Game thread.
+	std::vector<std::string> FaceShapeNames(RE::Actor* actor);
+	void CullFaceShapes(RE::Actor* actor, const std::set<std::string>& hide);
+	void SetUbeEyes(float side, float down, float up);  // UBE eye files: strength of the per-eye look channels (sideways, down, up); 1 = the unit channel (a 10 degree turn per 1.0 sideways / down, the shipped morph up)
+	void SetUbeAdjust(int sidePct, int downPct, int upPct);  // the menu's view of SetUbeEyes: % change from the calibrated UBE look (0 = as shipped)
+	void SetShadowStrength(float k);   // 0..1: opacity of the add-on eyes' black shadow shell (Advanced Eyes Addon: its gradient is steep, so a small lid shift shows a much darker band)
+	void SetVertLimit(float degrees);  // add-on eyes: the most an eyeball may turn up or down in total (its dark rim shows in the lid opening beyond that)
+	void SetLidFollow(float k);     // 0..1: on heads with an add-on eye pack, how much the head's eyelids follow a look up / down (the eye turns further than a stock eye, so full lids droop over it)
 	void SetBump(bool on);          // after writing, also increase the mesh's frameCount (the engine's "vertex data changed" counter?)
 	void StartFrameLoop();         // once, after the game data is loaded
 }

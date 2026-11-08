@@ -22,6 +22,11 @@ namespace FaceLab::Fam
 		std::vector<std::string>                  files;   // full paths of the files merged into this part, first one first
 		std::vector<std::string>                  rels;    // the same files as written in Families.h
 		std::map<std::string, std::vector<float>> morphs;  // plain name -> offsets (3 floats per vertex)
+		// Add-on eye packs (Advanced Eyes Addon) draw only a front cap of the eyeball: turn it too far and its open edge swings into the lid opening (a dark wedge). The largest
+		// weight each per-eye look channel may have, so that gain x weight stays inside a safe angle. 0 = no limit. [0] sideways, [1] up, [2] down.
+		float eyeWMax[3]{ 0.0f, 0.0f, 0.0f };
+		bool  ube{ false };  // UBE's own eye files: the per-eye look channels are unit strength here; FaceLab multiplies them at run time (the UBE eye sliders)
+		float lookDeg[2]{ 0.0f, 0.0f };  // degrees one unit of the per-eye LookUp / LookDown turns the eyeball (the vertical limit adds these to the TurnUp / TurnDown ones, 10 degrees a unit)
 	};
 
 	// rel (as in Families.h, relative to the Meshes folder) -> full path of the file that exists, or "" when it is not installed

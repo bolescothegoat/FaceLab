@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <string_view>
+#include <fstream>
 
 namespace FaceLab::Fam
 {
@@ -39,7 +41,82 @@ namespace FaceLab::Fam
 		// One eye at a time: every Look morph again with only the vertices of her left (x < 0) or right (x > 0) side. The eyes, the lids in the head and the brows all split the same way.
 		// Pure-rotation eye turns (EyeLeftTurnUp ... EyeRightTurnRight): the shipped Look morphs mostly SLIDE the eyeball up or down, which exposes the dark baked rim of the eye
 		// texture under the lid when looking up. These turn the eyeball about its own centre instead: 10 degrees per 1.0 of weight. Only for the eye files.
-		void AddEyeMorphs(Part& out, bool eyeFile)
+		// Centre of the sphere an eyeball is part of (algebraic least-squares fit of |p|^2 = 2 c.p + k over the given vertices). An add-on eye pack draws only a front CAP of the
+		// eyeball (Advanced Eyes Addon: 0.84 deep on a sphere of radius 1.23), whose centroid sits 1.1 units in front of the true centre; turning it about the centroid tilts the
+		// cap in place instead of turning the eye. false = could not fit (too few or flat vertices): the caller keeps the centroid.
+		bool FitSphereCentre(const Part& p, const std::vector<int>& side, int s, double& cx, double& cy, double& cz)
+		{
+			double N[4][5] = {};
+			int    n = 0;
+			for (std::size_t i = 0; i < static_cast<std::size_t>(p.nv); ++i) {
+				if (side[i] != s) {
+					continue;
+				}
+				const double x = p.base[i * 3], y = p.base[i * 3 + 1], z = p.base[i * 3 + 2];
+				const double row[4] = { 2 * x, 2 * y, 2 * z, 1.0 };
+				const double rhs = x * x + y * y + z * z;
+				for (int a = 0; a < 4; ++a) {
+					for (int b = 0; b < 4; ++b) {
+						N[a][b] += row[a] * row[b];
+					}
+					N[a][4] += row[a] * rhs;
+				}
+				++n;
+			}
+			if (n < 16) {
+				return false;
+			}
+			for (int c = 0; c < 4; ++c) {
+				int piv = c;
+				for (int r = c + 1; r < 4; ++r) {
+					if (std::fabs(N[r][c]) > std::fabs(N[piv][c])) {
+						piv = r;
+					}
+				}
+				if (std::fabs(N[piv][c]) < 1e-9) {
+					return false;
+				}
+				for (int k = 0; k < 5; ++k) {
+					std::swap(N[c][k], N[piv][k]);
+				}
+				for (int r = 0; r < 4; ++r) {
+					if (r != c) {
+						const double f = N[r][c] / N[c][c];
+						for (int k = 0; k < 5; ++k) {
+							N[r][k] -= f * N[c][k];
+						}
+					}
+				}
+			}
+			cx = N[0][4] / N[0][0];
+			cy = N[1][4] / N[1][1];
+			cz = N[2][4] / N[2][2];
+			const double r2 = N[3][4] / N[3][3] + cx * cx + cy * cy + cz * cz;
+			return std::isfinite(cx) && std::isfinite(cy) && std::isfinite(cz) && r2 > 0.04 && r2 < 100.0;
+		}
+
+		// Where to pivot instead of the fit of this file: the iris lens is a far shallower cap than the eyeball, so its own fit is loose; it has to turn about the eyeball's centre.
+		struct PivotHint
+		{
+			bool   has{ false };
+			double c[2][3]{};  // [0] left (x < 0), [1] right (x > 0)
+		};
+
+		// pack = an add-on eye pack (see LoadFile): its eyeball is a cap, so the turn pivots about the fitted sphere centre, every vertex turns the same, and the per-eye look UP / DOWN
+		// become true turns (the shipped ones slide the whole cap, which pulls its dark rim into view above the iris). gain / gainDown say how strong a unit of look should be.
+		// UBE's own eye files (Data/Meshes/!UBE/Eyes/*.tri): measured side by side in game, a UBE head turns far less than a vanilla-style head for the same weight (the shipped
+		// look morphs move the eye about 0.1-0.2 units per 1.0 and only slide it). The per-eye look channels (not the combined Look morphs other mods use) are built differently:
+		// sideways and down become true turns (UbeTurn), up keeps the shipped morph with a gain (UbeGain). Both can be overridden with one text file each in Data/SKSE/Plugins/FaceLab/.
+		bool IsUbeEyePath(std::string path)
+		{
+			std::replace(path.begin(), path.end(), '\\', '/');
+			std::transform(path.begin(), path.end(), path.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			return ("/" + path).find("/!ube/eyes/") != std::string::npos;
+		}
+
+		const std::pair<float, float> kUbeUnit{ 1.0f, 1.0f };  // UBE eyes are built at unit strength; Morph multiplies the per-eye look channels live (Lab: ubeSide / ubeDown / ubeUp)
+
+		void AddEyeMorphs(Part& out, bool eyeFile, float gain = 1.0f, float gainDown = 1.0f, bool pack = false, const PivotHint* hint = nullptr, const std::pair<float, float>* ubeTurn = nullptr)
 		{
 			const int nv = out.nv;
 			if (out.base.size() != static_cast<std::size_t>(nv) * 3) {
@@ -62,6 +139,12 @@ namespace FaceLab::Fam
 							dl[i * 3] = dl[i * 3 + 1] = dl[i * 3 + 2] = 0.0f;
 						}
 					}
+					const float gn = std::string_view(dir) == "Down" ? gainDown : gain;  // AEA's LookDown is the weakest (~55% of vanilla)
+					if (gn != 1.0f) {
+						for (auto& x : dl) {
+							x *= gn;
+						}
+					}
 					out.morphs[std::string(s < 0 ? "EyeLeftLook" : "EyeRightLook") + dir] = std::move(dl);
 				}
 			}
@@ -82,7 +165,7 @@ namespace FaceLab::Fam
 						m = std::max(m, std::sqrt(dd[k] * dd[k] + dd[k + 1] * dd[k + 1] + dd[k + 2] * dd[k + 2]));
 					}
 				}
-				mask[static_cast<std::size_t>(i)] = std::min(1.0f, m / 0.15f);
+				mask[static_cast<std::size_t>(i)] = pack ? 1.0f : std::min(1.0f, m / 0.15f);  // a cap must turn as one piece
 			}
 			for (const int s : { -1, 1 }) {
 				double cx = 0, cy = 0, cz = 0;
@@ -102,6 +185,21 @@ namespace FaceLab::Fam
 				cx /= n;
 				cy /= n;
 				cz /= n;
+				if (pack) {
+					double fx = 0, fy = 0, fz = 0;
+					if (hint && hint->has) {
+						fx = hint->c[s < 0 ? 0 : 1][0];
+						fy = hint->c[s < 0 ? 0 : 1][1];
+						fz = hint->c[s < 0 ? 0 : 1][2];
+						cx = fx;
+						cy = fy;
+						cz = fz;
+					} else if (FitSphereCentre(out, side, s, fx, fy, fz)) {
+						cx = fx;
+						cy = fy;
+						cz = fz;
+					}
+				}
 				const char* names[4] = { "Left", "Right", "Up", "Down" };
 				for (int dirIdx = 0; dirIdx < 4; ++dirIdx) {
 					std::vector<float> dl(static_cast<std::size_t>(nv) * 3, 0.0f);
@@ -136,6 +234,38 @@ namespace FaceLab::Fam
 						dl[static_cast<std::size_t>(i) * 3 + 2] = (nz - pz) * mk;
 					}
 					out.morphs[std::string(s < 0 ? "EyeLeftTurn" : "EyeRightTurn") + names[dirIdx]] = std::move(dl);
+				}
+				if (pack) {
+					// per-eye look up / down as true turns: a unit of the shipped look turned the eye about 4.8 degrees (and slid it); keep that strength (x gain) but as a turn.
+					// Up is a small share on purpose: Fourth Wall sends TurnUp as well and the two add. Down has no turn channel of its own in Fourth Wall, so it carries all of it.
+					const std::string pre = s < 0 ? "EyeLeft" : "EyeRight";
+					const std::pair<const char*, float> conv[2] = { { "Up", gain * 0.25f }, { "Down", gainDown * 0.5f } };
+					for (const auto& [dn, k] : conv) {
+						if (const auto it = out.morphs.find(pre + "Turn" + dn); it != out.morphs.end()) {
+							std::vector<float> t = it->second;
+							for (auto& v : t) {
+								v *= k;
+							}
+							out.morphs[pre + "Look" + dn] = std::move(t);
+						}
+					}
+				}
+				if (ubeTurn) {
+					// UBE eyes: the shipped Look morphs barely move the eye (down is the weakest, about 0.1 units per 1.0) and only slide it. The per-eye look channels Fourth Wall
+					// sends become true turns instead, with the strength found by comparing a UBE character with a vanilla-style one in game (a turn of 3.0 matched a look-down
+					// of 1.0, and a turn of about 2.1 per 1.0 matched sideways). Up stays the shipped morph (with its gain): Fourth Wall adds its own turn up.
+					const std::string pre = s < 0 ? "EyeLeft" : "EyeRight";
+					// All four are true turns at 10 degrees per 1.0 now (Up too: the shipped UBE LookUp is tiny, so it did nothing); Morph scales them live by the menu sliders.
+					const std::pair<const char*, float> conv[4] = { { "Left", ubeTurn->first }, { "Right", ubeTurn->first }, { "Down", ubeTurn->second }, { "Up", ubeTurn->first } };
+					for (const auto& [dn, k] : conv) {
+						if (const auto it = out.morphs.find(pre + "Turn" + dn); it != out.morphs.end()) {
+							std::vector<float> t = it->second;
+							for (auto& v : t) {
+								v *= k;
+							}
+							out.morphs[pre + "Look" + dn] = std::move(t);
+						}
+					}
 				}
 			}
 		}
@@ -511,6 +641,27 @@ namespace FaceLab::Fam
 			}
 			note(std::format("{}: {} -> {} vertices, {} morph(s), {} new", def.name, full, f.nv, f.morphs.size(), added));
 		}
+		// UBE's eyeball is a shallow CAP (measured: y 5.0..6.97, sphere centre y 5.85, radius 1.16; its centroid sits 0.52 in front of the centre). So like an add-on eye
+		// pack it must turn RIGIDLY about the fitted sphere centre: the old per-vertex mask (from UBE's tiny shipped morphs) bent the cap and pivoted about the centroid,
+		// which tilted the eye out of its socket and made the sideways look cross-eyed. The pivot is fitted once on eyesfemale.tri and shared by every UBE eye part.
+		PivotHint ubeHint;
+		for (auto& p : parts) {
+			for (const auto& fl : p.rels) {
+				const std::string lf = "/" + Lower(fl);
+				if (lf.find("/!ube/eyes/eyesfemale.tri") != std::string::npos || lf.find("/!ube/eyes/eyesmale.tri") != std::string::npos) {
+					std::vector<int> es(static_cast<std::size_t>(p.nv), 0);
+					for (int i = 0; i < p.nv; ++i) {
+						const float x = p.base[static_cast<std::size_t>(i) * 3];
+						es[static_cast<std::size_t>(i)] = x < -0.01f ? -1 : (x > 0.01f ? 1 : 0);
+					}
+					bool ok = true;
+					for (int k = 0; k < 2; ++k) {
+						ok = ok && FitSphereCentre(p, es, k == 0 ? -1 : 1, ubeHint.c[k][0], ubeHint.c[k][1], ubeHint.c[k][2]);
+					}
+					ubeHint.has = ok;
+				}
+			}
+		}
 		for (auto& p : parts) {
 			bool eyeFile = false;
 			for (const auto& fl : p.rels) {
@@ -518,7 +669,20 @@ namespace FaceLab::Fam
 					eyeFile = true;
 				}
 			}
-			AddEyeMorphs(p, eyeFile);
+			bool ube = false;
+			bool shell = false;  // the eye SHADOW and the wet rim lie on the lids, they are not eyeballs: they keep the shipped morphs and never turn with the eye (a turned shadow's dark edge slid over the iris)
+			for (const auto& fl : p.rels) {
+				ube = ube || IsUbeEyePath(fl);
+				shell = shell || Has(fl, "shadow") || Has(fl, "wetness");
+			}
+			if (ube && shell) {
+				AddEyeMorphs(p, false);
+			} else if (ube) {
+				p.ube = true;
+				AddEyeMorphs(p, eyeFile, 1.0f, 1.0f, ubeHint.has && eyeFile, ubeHint.has ? &ubeHint : nullptr, &kUbeUnit);
+			} else {
+				AddEyeMorphs(p, eyeFile);
+			}
 		}
 		if (def.followHead && parts.size() > 1) {
 			// parts[0] is the head (its file is first in the list)
@@ -554,7 +718,70 @@ namespace FaceLab::Fam
 		for (auto& [name, dl] : f.morphs) {
 			out.morphs.try_emplace(name, std::move(dl));
 		}
-		AddEyeMorphs(out, Lower(fullPath).find("eyes") != std::string::npos);
+		// Eye shapes of an add-on eye pack (Advanced Eyes Addon: EXPR_LDD_Eye_Inner / Outer / Shadow / lens files). Their shipped Look morphs move the eye less than the
+		// vanilla ones (~75% sideways, ~60% up/down), so the per-eye look is multiplied by a gain, and they get the rotation morphs like a vanilla eye file.
+		// Gain default 2.0; Data/SKSE/Plugins/FaceLab/EyePackGain.txt (one number) overrides it for tuning.
+		const std::string low = Lower(fullPath);
+		const bool        eyePack = low.find("_eye_") != std::string::npos && low.find("caruncula") == std::string::npos;
+		static const std::pair<float, float> packGain = []() {
+			float         g = 2.0f, gd = 3.0f;
+			std::ifstream f("Data/SKSE/Plugins/FaceLab/EyePackGain.txt");  // "2.0" or "2.0 3.0": sideways+up, then down
+			float         v = 0.0f, w = 0.0f;
+			if (f && (f >> v) && v >= 0.1f && v <= 6.0f) {
+				g = v;
+				gd = (f >> w) && w >= 0.1f && w <= 6.0f ? w : v * 1.5f;
+			}
+			return std::make_pair(g, gd);
+		}();
+		PivotHint hint;
+		if (eyePack && (low.find("_lensl") != std::string::npos || low.find("_lensr") != std::string::npos)) {
+			// the matching eyeball file (the same name without _LensL / _LensR): its sphere centre is the pivot of both
+			std::string inner = fullPath;
+			for (const char* tag : { "_LensL", "_LensR", "_lensl", "_lensr" }) {
+				if (const auto at = inner.find(tag); at != std::string::npos) {
+					inner.erase(at, 6);
+					break;
+				}
+			}
+			Tri::File ef;
+			std::string e2;
+			if (inner != fullPath && Tri::Read(inner, ef, e2) && ef.base.size() == static_cast<std::size_t>(ef.nv) * 3) {
+				Part         ep;
+				ep.nv = ef.nv;
+				ep.base = ef.base;
+				std::vector<int> es(static_cast<std::size_t>(ep.nv), 0);
+				for (int i = 0; i < ep.nv; ++i) {
+					const float x = ep.base[static_cast<std::size_t>(i) * 3];
+					es[static_cast<std::size_t>(i)] = x < -0.01f ? -1 : (x > 0.01f ? 1 : 0);
+				}
+				bool ok = true;
+				for (int k = 0; k < 2; ++k) {
+					ok = ok && FitSphereCentre(ep, es, k == 0 ? -1 : 1, hint.c[k][0], hint.c[k][1], hint.c[k][2]);
+				}
+				hint.has = ok;
+			}
+		}
+		const bool ubeEye = IsUbeEyePath(low);
+		out.ube = ubeEye && !eyePack;
+		AddEyeMorphs(out, low.find("eyes") != std::string::npos || eyePack, eyePack ? packGain.first : 1.0f, eyePack ? packGain.second : 1.0f, eyePack, hint.has ? &hint : nullptr, ubeEye && !eyePack ? &kUbeUnit : nullptr);
+		if (eyePack) {
+			// Measured on the AEA eyeball (a cap 0.84 deep, rim radius 1.15, sphere radius about 1.2): one unit of the shipped look morph turns it about 14 degrees sideways and
+			// 5 degrees up or down. Past roughly 30 degrees the cap's open edge shows in the lid opening. MaxAngle (degrees, default 28) can be set in
+			// Data/SKSE/Plugins/FaceLab/EyePackMaxAngle.txt (one number, 10 to 60).
+			static const float maxDeg = []() {
+				float         v = 28.0f, x = 0.0f;
+				std::ifstream f("Data/SKSE/Plugins/FaceLab/EyePackMaxAngle.txt");
+				if (f && (f >> x) && x >= 10.0f && x <= 60.0f) {
+					v = x;
+				}
+				return v;
+			}();
+			out.eyeWMax[0] = maxDeg / (14.0f * packGain.first);
+			out.eyeWMax[1] = maxDeg / (5.0f * packGain.first);
+			out.eyeWMax[2] = maxDeg / (5.0f * packGain.second);
+			out.lookDeg[0] = 10.0f * packGain.first * 0.25f;
+			out.lookDeg[1] = 10.0f * packGain.second * 0.5f;
+		}
 		return !out.morphs.empty();
 	}
 }

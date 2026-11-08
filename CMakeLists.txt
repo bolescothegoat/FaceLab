@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.21)
 
-project(FaceLab VERSION 0.2.0 LANGUAGES CXX)
+project(FaceLab VERSION 0.2.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -26,6 +26,7 @@ add_library(FaceLab SHARED
 	src/TriFile.cpp
 	src/Families.cpp
 	src/FamilyLoad.cpp
+	src/Scenes.cpp
 )
 target_include_directories(FaceLab PRIVATE src)
 target_precompile_headers(FaceLab PRIVATE src/PCH.h)

@@ -14,6 +14,10 @@ namespace FaceLab::Api
 	void ApplyWeights(RE::FormID id, std::string owner, Weights w, float fade, int priority);
 	bool ApplyPreset(RE::FormID id, std::string owner, std::string_view preset, float fade, int priority);  // false: no such preset
 	void Clear(RE::FormID id, std::string owner, float fade);
+	// An assist layer: channels added on top of whatever face the actor shows, or on no face at all, kept by owner (Lab: the Tongue assist). Unlike a face it never replaces
+	// anything, and unlike the gaze layer it takes any channel. Summed with the gaze layer, so the two never overwrite each other.
+	void SetAssist(RE::FormID id, std::string owner, Weights w, float fade);
+	void ClearAssist(RE::FormID id, std::string owner, float fade);
 	// Someone is speaking with the mouth (lip sync): the face's Mouth-channel morphs fade down by `amount` (1 = fully out) so the speech drives the mouth.
 	// Every asker is remembered by owner; the biggest amount counts. amount 0 gives the mouth back.
 	void SetMouthYield(RE::FormID id, std::string owner, float amount, float fade);

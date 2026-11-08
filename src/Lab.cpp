@@ -8,7 +8,10 @@
 #include <toml++/toml.hpp>
 
 #include <Windows.h>
+#include <psapi.h>
+#include <atomic>
 #include <fstream>
+#include <set>
 
 namespace FaceLab
 {
@@ -19,6 +22,15 @@ namespace FaceLab
 		std::atomic<bool> g_applied{ false };
 		std::atomic<long long> g_labUntil{ 0 };  // steady-clock ms when the lab face lets go; 0 = never
 		RE::FormID        g_labActor{ 0 };
+		constexpr const char*     kTongueOwner = "FaceLab.Tongue";  // the Tongue assist layer
+		std::mutex                g_shMx;
+		std::set<std::string>     g_shHide;       // face shapes the debug list hides
+		std::vector<std::string>  g_shNames;      // the target's face shapes (refreshed about once a second)
+		long long                 g_shNext{ 0 };
+		std::atomic<RE::FormID>   g_crossId{ 0 };
+		std::atomic<bool>         g_tongueOn{ false };
+		std::atomic<RE::FormID>   g_tongueActor{ 0 };
+		std::atomic<long long>    g_tongueUntil{ 0 };  // like the lab face: lets go by itself unless 'keep until reset' is on
 
 		long long NowMs()
 		{
@@ -52,10 +64,15 @@ namespace FaceLab
 					w.push_back({ name, static_cast<float>(v) / 100.0f });
 				}
 			}
+			for (const auto& [wn, wv] : w) {
+				if (wn == "TongueOut" && wv > 0.0f) {
+					logger::info("Lab face asks for a tongue: TongueOut {:.2f} on {} ({:08X})", wv, a->GetDisplayFullName(), a->GetFormID());
+				}
+			}
 			Morph::SetBump(s.bump);
 			Api::ApplyWeights(a->GetFormID(), kLabOwner, std::move(w), static_cast<float>(s.lerpMs) / 1000.0f, 1000);
 			g_labActor = a->GetFormID();
-			g_labUntil = s.labHold > 0 ? NowMs() + static_cast<long long>(s.labHold) * 1000 : 0;
+			g_labUntil = s.labHold > 0 && !s.holdUntilReset ? NowMs() + static_cast<long long>(s.labHold) * 1000 : 0;
 		}
 
 		bool Readable(const void* p, std::size_t n)
@@ -162,8 +179,21 @@ namespace FaceLab
 			s.enabled = tbl["enabled"].value_or(s.enabled);
 			s.lerpMs = std::clamp(tbl["lerpMs"].value_or(s.lerpMs), 0, 5000);
 			s.labHold = std::clamp(tbl["labHold"].value_or(s.labHold), 0, 600);
+			s.holdUntilReset = tbl["holdUntilReset"].value_or(s.holdUntilReset);
 			s.target = std::clamp(tbl["target"].value_or(s.target), 0, 1);
 			s.live = tbl["live"].value_or(s.live);
+			s.scenes = tbl["scenes"].value_or(s.scenes);
+			s.tongueOut = std::clamp(tbl["tongueOut"].value_or(s.tongueOut), 0, 100);
+			s.lidFollow = std::clamp(tbl["lidFollow"].value_or(s.lidFollow), 0, 250);
+			Morph::SetLidFollow(static_cast<float>(s.lidFollow) / 100.0f);
+			s.ubeSide = std::clamp(tbl["ubeSideAdj"].value_or(s.ubeSide), -100, 100);
+			s.ubeDown = std::clamp(tbl["ubeDownAdj"].value_or(s.ubeDown), -100, 100);
+			s.ubeUp = std::clamp(tbl["ubeUpAdj"].value_or(s.ubeUp), -100, 100);
+			Morph::SetUbeAdjust(s.ubeSide, s.ubeDown, s.ubeUp);
+			s.vertLimit = std::clamp(tbl["vertLimit"].value_or(s.vertLimit), 4, 60);
+			Morph::SetVertLimit(static_cast<float>(s.vertLimit));
+			s.shadowStrength = std::clamp(tbl["shadowStrength"].value_or(s.shadowStrength), 0, 100);
+			Morph::SetShadowStrength(static_cast<float>(s.shadowStrength) / 100.0f);
 			s.bump = tbl["patchFmd"].value_or(s.bump);
 			s.debug = tbl["debug"].value_or(s.debug);
 			if (auto t = tbl["keys"].as_table()) {
@@ -171,6 +201,12 @@ namespace FaceLab
 				s.kbMod = (*t)["keyboardModifier"].value_or(s.kbMod);
 				s.padKey = (*t)["gamepad"].value_or(s.padKey);
 				s.padMod = (*t)["gamepadModifier"].value_or(s.padMod);
+			}
+			if (auto t = tbl["tongueKeys"].as_table()) {
+				s.tKbKey = (*t)["keyboard"].value_or(s.tKbKey);
+				s.tKbMod = (*t)["keyboardModifier"].value_or(s.tKbMod);
+				s.tPadKey = (*t)["gamepad"].value_or(s.tPadKey);
+				s.tPadMod = (*t)["gamepadModifier"].value_or(s.tPadMod);
 			}
 			auto* arr = tbl["values"].as_array();
 			if (!arr) {
@@ -203,6 +239,8 @@ namespace FaceLab
 		const auto& s = GetSettings();
 		auto        b = [](bool v) { return v ? "true" : "false"; };
 		std::string o = "# FaceLab settings. Written by the in-game menu (SKSE Menu Framework > FaceLab).\n";
+		o += std::format("holdUntilReset = {}\nscenes = {}\ntongueOut = {}\nlidFollow = {}\nvertLimit = {}\nshadowStrength = {}\n", b(s.holdUntilReset), b(s.scenes), s.tongueOut, s.lidFollow, s.vertLimit, s.shadowStrength);
+		o += std::format("ubeSideAdj = {}\nubeDownAdj = {}\nubeUpAdj = {}\n", s.ubeSide, s.ubeDown, s.ubeUp);
 		o += std::format("enabled = {}\nlerpMs = {}\nlabHold = {}\ntarget = {}\nlive = {}\npatchFmd = {}\ndebug = {}\n", b(s.enabled), s.lerpMs, s.labHold, s.target, b(s.live), b(s.bump), b(s.debug));
 		o += "\n# one value per channel in the menu's order (weight x 100, 0-300)\nvalues = [";
 		for (std::size_t i = 0; i < s.values.size(); ++i) {
@@ -210,6 +248,7 @@ namespace FaceLab
 		}
 		o += "]\n";
 		o += std::format("\n[keys]\nkeyboard = {}\nkeyboardModifier = {}\ngamepad = {}\ngamepadModifier = {}\n", s.kbKey, s.kbMod, s.padKey, s.padMod);
+		o += std::format("\n[tongueKeys]\nkeyboard = {}\nkeyboardModifier = {}\ngamepad = {}\ngamepadModifier = {}\n", s.tKbKey, s.tKbMod, s.tPadKey, s.tPadMod);
 		o += "\n# morphs only some heads have (CoTR, UBE ...), by name: weight x 100, 0-300\n[extras]\n";
 		for (const auto& [name, v] : s.extras) {
 			if (v != 0) {
@@ -335,6 +374,158 @@ namespace FaceLab
 		}
 	}
 
+	namespace
+	{
+	// A tongue mod announces itself by exporting FaceLab_TongueStatus; FaceLab looks through the loaded modules for it, so it never depends on a file name.
+	using TongueStatusFn = int (*)(unsigned int);
+	std::atomic<TongueStatusFn> g_tongueStatusFn{ nullptr };
+	std::atomic<long long>      g_tongueScanAt{ 0 };
+
+	TongueStatusFn FindTongueMod()
+	{
+		if (const auto f = g_tongueStatusFn.load()) {
+			return f;
+		}
+		const long long now = NowMs();
+		if (now < g_tongueScanAt.load()) {
+			return nullptr;
+		}
+		g_tongueScanAt = now + 2000;  // modules can load late: look again every two seconds until one answers
+		HMODULE mods[1024]{};
+		DWORD   need = 0;
+		if (!::EnumProcessModules(::GetCurrentProcess(), mods, sizeof(mods), &need)) {
+			return nullptr;
+		}
+		const auto n = std::min<std::size_t>(need / sizeof(HMODULE), 1024);
+		for (std::size_t i = 0; i < n; ++i) {
+			if (const auto p = ::GetProcAddress(mods[i], "FaceLab_TongueStatus")) {
+				g_tongueStatusFn = reinterpret_cast<TongueStatusFn>(p);
+				return g_tongueStatusFn.load();
+			}
+		}
+		return nullptr;
+	}
+	}
+
+	bool TongueModInstalled()
+	{
+		return FindTongueMod() != nullptr;
+	}
+
+	int TongueModStatus(unsigned int formID)
+	{
+		const auto f = FindTongueMod();
+		return f ? f(formID) : -99;
+	}
+
+	bool ShapeSnapshot(std::vector<std::string>& names)
+	{
+	const long long now = NowMs();
+	bool ask = false;
+	{
+		std::lock_guard lk(g_shMx);
+		if (now >= g_shNext) {
+			g_shNext = now + 1000;
+			ask = true;
+		}
+		names = g_shNames;
+	}
+	if (ask) {
+		SKSE::GetTaskInterface()->AddTask([]() {
+			auto n = Morph::FaceShapeNames(Target());
+			std::lock_guard lk(g_shMx);
+			g_shNames = std::move(n);
+		});
+	}
+	return !names.empty();
+	}
+
+	bool ShapeHidden(const std::string& name)
+	{
+	std::lock_guard lk(g_shMx);
+	return g_shHide.contains(name);
+	}
+
+	void SetShapeHidden(const std::string& name, bool hidden)
+	{
+	{
+		std::lock_guard lk(g_shMx);
+		if (hidden) {
+			g_shHide.insert(name);
+		} else {
+			g_shHide.erase(name);
+		}
+	}
+	SKSE::GetTaskInterface()->AddTask([]() {
+		std::set<std::string> h;
+		{
+			std::lock_guard lk(g_shMx);
+			h = g_shHide;
+		}
+		Morph::CullFaceShapes(Target(), h);
+	});
+	}
+
+	void SetTongue(bool on)
+	{
+		SKSE::GetTaskInterface()->AddTask([on]() {
+			const auto& s = GetSettings();
+			const float fade = static_cast<float>(s.lerpMs) / 1000.0f;
+			if (on) {
+				auto* a = Target();
+				if (!a) {
+					RE::SendHUDMessage::ShowHUDMessage("FaceLab: no target (look at an NPC first)");
+					return;
+				}
+				if (const auto old = g_tongueActor.load(); old != 0 && old != a->GetFormID()) {
+					Api::ClearAssist(old, kTongueOwner, fade);
+				}
+				// which tongue is shown is the tongue mod's own setting; FaceLab only asks for TongueOut
+				Api::SetAssist(a->GetFormID(), kTongueOwner, { { "TongueOut", static_cast<float>(s.tongueOut) / 100.0f } }, fade);
+				logger::info("Tongue assist ON: {} ({:08X}), TongueOut {:.2f}, tongue mod {}", a->GetDisplayFullName(), a->GetFormID(), static_cast<float>(s.tongueOut) / 100.0f,
+					TongueModInstalled() ? "found" : "NOT found");
+				g_tongueActor = a->GetFormID();
+				g_tongueOn = true;
+				g_tongueUntil = s.labHold > 0 && !s.holdUntilReset ? NowMs() + static_cast<long long>(s.labHold) * 1000 : 0;
+			} else {
+				if (const auto id = g_tongueActor.load(); id != 0) {
+					Api::ClearAssist(id, kTongueOwner, fade);
+					logger::info("Tongue assist OFF ({:08X})", id);
+				}
+				g_tongueOn = false;
+				g_tongueActor = 0;
+				g_tongueUntil = 0;
+			}
+		});
+	}
+
+	RE::FormID TargetFormID()
+	{
+	return GetSettings().target == 0 ? 0x14 : g_crossId.load();
+	}
+
+	bool TongueOn()
+	{
+		return g_tongueOn.load();
+	}
+
+	void ToggleTongue()
+	{
+		const bool turningOn = !g_tongueOn.load();
+		if (turningOn && GetSettings().tongueOut <= 0) {
+			GetSettings().tongueOut = 100;  // a tongue asked for at 0 never shows: switching it on means it should come out (the button and the hotkey both land here)
+			SaveConfig();
+		}
+		SetTongue(turningOn);
+	}
+
+	void ApplyTongueAmount()
+	{
+		if (g_tongueOn.load()) {
+			SetTongue(true);
+		}
+	}
+
 	void LoadPreset(int which)
 	{
 		auto& v = GetSettings().values;
@@ -367,12 +558,34 @@ namespace FaceLab
 						g_applied = false;
 					});
 				}
+				{
+					bool any = false;
+					{
+						std::lock_guard lk(g_shMx);
+						any = !g_shHide.empty();
+					}
+					if (any) {
+						SKSE::GetTaskInterface()->AddTask([]() {
+							std::set<std::string> h;
+							{
+								std::lock_guard lk(g_shMx);
+								h = g_shHide;
+							}
+							Morph::CullFaceShapes(Target(), h);
+						});
+					}
+				}
+				if (const auto until = g_tongueUntil.load(); until != 0 && NowMs() >= until) {  // the tongue lets go on its own too
+					g_tongueUntil = 0;
+					SetTongue(false);
+				}
 				SKSE::GetTaskInterface()->AddTask([]() {
 					if (auto* pick = RE::CrosshairPickData::GetSingleton()) {
 						if (auto ref = pick->target.get()) {
 							if (auto* a = ref->As<RE::Actor>(); a && !a->IsPlayerRef()) {
 								std::lock_guard lk(g_mx);
 								g_cross = a->GetHandle();
+								g_crossId = a->GetFormID();
 								g_crossName = a->GetDisplayFullName();
 							}
 						}
