@@ -556,11 +556,30 @@ namespace FaceLab::Scenes
 				cd->Done();
 			}
 			// the tags of what is playing, asked of the thread controller that sent the event
-			if (!CallOnForm(controller, "sslThreadController", "GetTags", RE::MakeFunctionArguments(), [sc, cd](const RE::BSScript::Variable& v) {
-					sc->tags = AsStrings(v);
+			// The thread's own GetTags keeps the tags of the animation the thread STARTED with (SexLab P+), so it goes stale as soon as the
+			// scene is switched. The scene that is playing now is asked of the registry; GetTags is only the fallback (older SexLab).
+			auto legacy = [sc, cd, controller]() {
+				if (!CallOnForm(controller, "sslThreadController", "GetTags", RE::MakeFunctionArguments(), [sc, cd](const RE::BSScript::Variable& v) {
+						sc->tags = AsStrings(v);
+						cd->Done();
+					})) {
 					cd->Done();
+				}
+			};
+			if (!CallOnForm(controller, "sslThreadController", "GetActiveScene", RE::MakeFunctionArguments(), [sc, cd, legacy](const RE::BSScript::Variable& v) {
+					const std::string sid = AsString(v);
+					if (sid.empty() || !CallStatic("SexLabRegistry", "GetSceneTags", RE::MakeFunctionArguments(RE::BSFixedString(sid.c_str())), [sc, cd, legacy](const RE::BSScript::Variable& t) {
+							sc->tags = AsStrings(t);
+							if (sc->tags.empty()) {
+								legacy();
+							} else {
+								cd->Done();
+							}
+						})) {
+						legacy();
+					}
 				})) {
-				cd->Done();
+				legacy();
 			}
 		}
 
