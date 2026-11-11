@@ -177,6 +177,7 @@ namespace FaceLab
 		try {
 			auto tbl = toml::parse_file(kPath);
 			s.enabled = tbl["enabled"].value_or(s.enabled);
+			s.language = tbl["language"].value_or(s.language);
 			s.lerpMs = std::clamp(tbl["lerpMs"].value_or(s.lerpMs), 0, 5000);
 			s.labHold = std::clamp(tbl["labHold"].value_or(s.labHold), 0, 600);
 			s.holdUntilReset = tbl["holdUntilReset"].value_or(s.holdUntilReset);
@@ -239,6 +240,7 @@ namespace FaceLab
 		const auto& s = GetSettings();
 		auto        b = [](bool v) { return v ? "true" : "false"; };
 		std::string o = "# FaceLab settings. Written by the in-game menu (SKSE Menu Framework > FaceLab).\n";
+		o += std::format("language = \"{}\"   # menu language: auto (the game's own) or a file name from Data/SKSE/Plugins/FaceLab/Languages\n", s.language);
 		o += std::format("holdUntilReset = {}\nscenes = {}\ntongueOut = {}\nlidFollow = {}\nvertLimit = {}\nshadowStrength = {}\n", b(s.holdUntilReset), b(s.scenes), s.tongueOut, s.lidFollow, s.vertLimit, s.shadowStrength);
 		o += std::format("ubeSideAdj = {}\nubeDownAdj = {}\nubeUpAdj = {}\n", s.ubeSide, s.ubeDown, s.ubeUp);
 		o += std::format("enabled = {}\nlerpMs = {}\nlabHold = {}\ntarget = {}\nlive = {}\npatchFmd = {}\ndebug = {}\n", b(s.enabled), s.lerpMs, s.labHold, s.target, b(s.live), b(s.bump), b(s.debug));

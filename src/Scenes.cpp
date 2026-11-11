@@ -519,6 +519,63 @@ namespace FaceLab::Scenes
 			return dh ? dh->LookupForm(0xD62, "SexLab.esm") : nullptr;
 		}
 
+#undef GetObject  // windows.h defines it as GetObjectA
+		// SexLab 1.6x: read the controller's Animation property, then ask that animation for its tags. false = could not even ask.
+		bool LegacyAnimationTags(RE::TESForm* controller, VarFn cb)
+		{
+			auto* vm = RE::BSScript::Internal::VirtualMachine::GetSingleton();
+			if (!vm || !controller) {
+				Say("SexLab legacy tags: no VM / no controller");
+				return false;
+			}
+			auto* policy = vm->GetObjectHandlePolicy();
+			if (!policy) {
+				return false;
+			}
+			const auto handle = policy->GetHandleForObject(static_cast<RE::VMTypeID>(controller->GetFormType()), controller);
+			if (handle == policy->EmptyHandle()) {
+				Say("SexLab legacy tags: no handle for the controller (form type {})", static_cast<int>(controller->GetFormType()));
+				return false;
+			}
+			RE::BSTSmartPointer<RE::BSScript::Object> obj;
+			if (!vm->FindBoundObject(handle, "sslThreadController", obj) || !obj) {
+				Say("SexLab legacy tags: controller object not found as sslThreadController");
+				return false;
+			}
+			RE::BSScript::Variable  prop;
+			const RE::BSScript::Variable* pv = nullptr;
+			const bool gotVm = vm->GetPropertyValue(obj, "Animation", prop);
+			if (gotVm && prop.IsObject()) {
+				pv = &prop;
+			}
+			if (!pv) {
+				// fall back to the object's own property / backing variable
+				for (const char* nm : { "Animation", "::Animation_var" }) {
+					const RE::BSScript::Variable* v = std::string_view(nm).starts_with("::") ? obj->GetVariable(nm) : obj->GetProperty(nm);
+					if (v && v->IsObject()) {
+						pv = v;
+						break;
+					}
+				}
+			}
+			if (!pv) {
+				Say("SexLab legacy tags: 'Animation' unreadable (vm read {}, vm var type {}, none-object {}; object class {})", gotVm, prop.GetType().TypeAsString(), prop.IsNoneObject(),
+					obj->GetTypeInfo() ? obj->GetTypeInfo()->GetName() : "?");
+				return false;
+			}
+			const auto anim = pv->GetObject();
+			if (!anim) {
+				Say("SexLab legacy tags: property 'Animation' is None");
+				return false;
+			}
+			RE::BSTSmartPointer<RE::BSScript::IStackCallbackFunctor> f(new VarFunctor(std::move(cb)));
+			const bool ok = vm->DispatchMethodCall(anim->GetHandle(), RE::BSFixedString("sslBaseObject"), RE::BSFixedString("GetTags"), RE::MakeFunctionArguments(), f);
+			if (!ok) {
+				Say("SexLab legacy tags: the VM refused GetTags on the animation");
+			}
+			return ok;
+		}
+
 		void SexLabScene(const std::string& tid, RE::TESForm* controller, bool orgasm)
 		{
 			auto* quest = SexLabQuest();
@@ -551,18 +608,34 @@ namespace FaceLab::Scenes
 			});
 			if (!CallOnForm(quest, "SexLabFramework", "HookActors", RE::MakeFunctionArguments(RE::BSFixedString(tid.c_str())), [sc, cd](const RE::BSScript::Variable& v) {
 					sc->actors = AsActors(v);
+					if (sc->actors.empty()) {
+						Say("SexLab: HookActors('{}') answered with no actors", sc->thread);
+					}
 					cd->Done();
 				})) {
+				Say("SexLab: the Papyrus VM refused HookActors (thread {})", sc->thread);
 				cd->Done();
 			}
 			// the tags of what is playing, asked of the thread controller that sent the event
 			// The thread's own GetTags keeps the tags of the animation the thread STARTED with (SexLab P+), so it goes stale as soon as the
 			// scene is switched. The scene that is playing now is asked of the registry; GetTags is only the fallback (older SexLab).
 			auto legacy = [sc, cd, controller]() {
-				if (!CallOnForm(controller, "sslThreadController", "GetTags", RE::MakeFunctionArguments(), [sc, cd](const RE::BSScript::Variable& v) {
+				// SexLab 1.6x: the thread's GetTags() holds only the tags the scene was REQUESTED with (e.g. "matchmaker"); the tags of the animation
+				// playing now (blowjob, oral, ...) are on the thread's Animation property (an sslBaseAnimation).
+				if (LegacyAnimationTags(controller, [sc, cd](const RE::BSScript::Variable& v) {
 						sc->tags = AsStrings(v);
 						cd->Done();
 					})) {
+					return;
+				}
+				if (!CallOnForm(controller, "sslThreadController", "GetTags", RE::MakeFunctionArguments(), [sc, cd](const RE::BSScript::Variable& v) {
+						sc->tags = AsStrings(v);
+						if (sc->tags.empty()) {
+							Say("SexLab: GetTags answered with no tags (thread {})", sc->thread);
+						}
+						cd->Done();
+					})) {
+					Say("SexLab: the Papyrus VM refused GetTags (thread {})", sc->thread);
 					cd->Done();
 				}
 			};

@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Bolescothegoat - FaceLab. See LICENSE.
 
 #include "Input.h"
+#include "Loc.h"
 #include "Lab.h"
 #include "Morph.h"
 #include "Presets.h"
@@ -9,6 +10,8 @@
 #include "SKSEMenuFramework.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdarg>
 
 #include <format>
 
@@ -23,10 +26,69 @@ namespace FaceLab::Menu
 		const G::ImVec4 kGood{ 0.45f, 0.90f, 0.45f, 1.0f };
 		const G::ImVec4 kWarn{ 1.00f, 0.75f, 0.30f, 1.0f };
 
+		// ---- translated drawing: every text goes through Loc (English falls through unchanged) ------------------------------------------
+		std::string VFmt(const char* fmt, va_list ap)
+		{
+			va_list c;
+			va_copy(c, ap);
+			const int n = std::vsnprintf(nullptr, 0, fmt, c);
+			va_end(c);
+			std::string out(n > 0 ? static_cast<std::size_t>(n) : 0, '\0');
+			if (n > 0) {
+				std::vsnprintf(out.data(), out.size() + 1, fmt, ap);
+			}
+			return out;
+		}
+
+		void Text(const char* fmt, ...)
+		{
+			va_list ap;
+			va_start(ap, fmt);
+			const auto s = VFmt(Loc::T(fmt), ap);
+			va_end(ap);
+			G::TextUnformatted(s.c_str());
+		}
+
+		void TextWrapped(const char* fmt, ...)
+		{
+			va_list ap;
+			va_start(ap, fmt);
+			const auto s = VFmt(Loc::T(fmt), ap);
+			va_end(ap);
+			G::TextWrapped("%s", s.c_str());
+		}
+
+		void TextCol(const G::ImVec4 col, const char* fmt, ...)
+		{
+			va_list ap;
+			va_start(ap, fmt);
+			const auto s = VFmt(Loc::T(fmt), ap);
+			va_end(ap);
+			G::TextColored(col, "%s", s.c_str());
+		}
+
+		void SeparatorText(const char* label) { G::SeparatorText(Loc::T(label)); }
+		bool Button(const char* label) { return G::Button(Loc::L(label)); }
+		bool SmallButton(const char* label) { return G::SmallButton(Loc::L(label)); }
+		bool Checkbox(const char* label, bool* v) { return G::Checkbox(Loc::L(label), v); }
+		bool RadioButton(const char* label, int* v, int value) { return G::RadioButton(Loc::L(label), v, value); }
+		bool SliderInt(const char* label, int* v, int lo, int hi, const char* fmt = "%d") { return G::SliderInt(Loc::L(label), v, lo, hi, Loc::T(fmt)); }
+
+		// a text with {} holes, translated, then filled in
+		template <class... A>
+		std::string TF(const char* key, A&&... a)
+		{
+			try {
+				return std::vformat(Loc::T(key), std::make_format_args(a...));
+			} catch (...) {
+				return std::vformat(key, std::make_format_args(a...));
+			}
+		}
+
 		void Tip(const char* text)
 		{
 			if (text && *text && G::IsItemHovered()) {
-				G::SetTooltip("%s", text);
+				G::SetTooltip("%s", Loc::T(text));
 			}
 		}
 
@@ -54,50 +116,50 @@ namespace FaceLab::Menu
 			auto& s = GetSettings();
 			bool  save = false;
 
-			G::SeparatorText("Target");
-			save |= G::RadioButton("The player", &s.target, 0);
+			SeparatorText("Target");
+			save |= RadioButton("The player", &s.target, 0);
 			G::SameLine();
-			save |= G::RadioButton("The actor I last looked at", &s.target, 1);
+			save |= RadioButton("The actor I last looked at", &s.target, 1);
 			G::SameLine();
 			const std::string tn = TargetName();
-			G::TextColored(kGood, "%s", tn.c_str());
+			TextCol(kGood, "%s", Loc::T(tn.c_str()));
 			Tip("Close this menu, look at an NPC for a moment, then open it again: the name appears here.");
 
-			G::SeparatorText("Fade");
+			SeparatorText("Fade");
 			G::PushItemWidth(320.0f);
-			save |= G::SliderInt("Fade time (ms)", &s.lerpMs, 0, 3000);
+			save |= SliderInt("Fade time (ms)", &s.lerpMs, 0, 3000);
 			G::PopItemWidth();
 			Tip("How long a face takes to arrive and to leave. 0 = instant.");
 			G::PushItemWidth(320.0f);
-			save |= G::SliderInt("Lab face holds for (seconds, 0 = until Reset)", &s.labHold, 0, 120);
+			save |= SliderInt("Lab face holds for (seconds, 0 = until Reset)", &s.labHold, 0, 120);
 			G::PopItemWidth();
 			Tip("A face you apply here outranks every other mod's face while it is on, so it lets go by itself after this long.");
-			save |= G::Checkbox("Keep a face until I reset it (ignores the time above)", &s.holdUntilReset);
+			save |= Checkbox("Keep a face until I reset it (ignores the time above)", &s.holdUntilReset);
 			Tip("The face stays on the target until you press Reset (or the hotkey). Applies the next time you apply a face.");
 			if (Applied()) {
-				G::TextColored(kWarn, "A lab face is ON: it overrides other mods' faces on the target until it expires or you press Reset.");
+				TextCol(kWarn, "A lab face is ON: it overrides other mods' faces on the target until it expires or you press Reset.");
 			}
-			save |= G::Checkbox("Apply a slider as soon as I move it", &s.live);
+			save |= Checkbox("Apply a slider as soon as I move it", &s.live);
 
-			G::SeparatorText("Apply");
-			if (G::Button("Apply all sliders")) {
+			SeparatorText("Apply");
+			if (Button("Apply all sliders")) {
 				ApplyAll();
 			}
 			G::SameLine();
-			if (G::Button("Reset the target's face")) {
+			if (Button("Reset the target's face")) {
 				Reset();
 			}
 			G::SameLine();
-			G::TextColored(Applied() ? kGood : kWarn, "%s", Applied() ? "applied" : "not applied");
-			G::SeparatorText("Tongue");
+			TextCol(Applied() ? kGood : kWarn, "%s", Loc::T(Applied() ? "applied" : "not applied"));
+			SeparatorText("Tongue");
 			{
 				const bool out = TongueOn();
-				if (G::Button(out ? "Put the tongue away" : "Show the tongue")) {
+				if (Button(out ? "Put the tongue away" : "Show the tongue")) {
 					ToggleTongue();
 				}
 				Tip("The Tongue assist: puts the tongue out on the target on top of whatever face is showing, a preset or none. How far out it goes is on the Assists page (it is set to 100 for you if it was 0). The tongue itself is drawn by a tongue mod, which also chooses which tongue is used.");
 				G::SameLine();
-				G::TextColored(out ? kGood : kWarn, "%s", out ? "tongue out" : "tongue away");
+				TextCol(out ? kGood : kWarn, "%s", Loc::T(out ? "tongue out" : "tongue away"));
 			}
 			{
 				// is a tongue mod listening, and what does it make of the request? (so a missing tongue says why)
@@ -108,11 +170,19 @@ namespace FaceLab::Menu
 				if (!installed) {
 					msg = "No tongue will be drawn: no tongue mod that works with FaceLab was found.";
 				} else if (ago < 0 || ago > 3000) {
-					msg = "A tongue mod is installed but is not asking FaceLab for tongues (is it switched on in its menu, and is it a version with FaceLab support?).";
+					// a tongue mod that has nothing to do (switched off, or no tongue found) never asks, but it can still say why
+					const int st = TongueModStatus(TargetFormID());
+					if (st == -1) {
+						msg = "The tongue mod is switched off in its own menu.";
+					} else if (st == -2) {
+						msg = "The tongue mod found no tongue to put on (it needs a tongue mod such as Halo's HDT Tongues).";
+					} else {
+						msg = "A tongue mod is installed but is not asking FaceLab for tongues (is it switched on in its menu, and is it a version with FaceLab support?).";
+					}
 				} else if (TongueOn()) {
 					switch (TongueModStatus(TargetFormID())) {
 					case -1: msg = "The tongue mod is switched off in its own menu."; break;
-					case -2: msg = "The tongue mod found no tongue armor (it needs the OStim / Halo tongue equip objects)."; break;
+					case -2: msg = "The tongue mod found no tongue to put on (it needs a tongue mod such as Halo's HDT Tongues)."; break;
 					case 0: msg = "The tongue mod has not seen the request for this character yet."; break;
 					case 1: msg = "The tongue mod skips this character: see its Who settings (player / others / females / males)."; break;
 					case 2: msg = "The tongue mod is putting a tongue on her."; break;
@@ -121,21 +191,21 @@ namespace FaceLab::Menu
 					}
 				}
 				if (msg) {
-					G::TextColored(good ? kGood : kWarn, "%s", msg);
+					TextCol(good ? kGood : kWarn, "%s", Loc::T(msg));
 				}
 			}
 
-			G::SeparatorText("Face sliders");
-			G::Text("Fill the sliders:");
+			SeparatorText("Face sliders");
+			Text("Fill the sliders:");
 			G::SameLine();
-			if (G::SmallButton("Clear")) {
+			if (SmallButton("Clear")) {
 				LoadPreset(0);
 			}
 			G::SameLine();
-			if (G::SmallButton("Just BigAah 3.0")) {
+			if (SmallButton("Just BigAah 3.0")) {
 				LoadPreset(3);
 			}
-			G::TextWrapped("Values are weight x 100: 100 = 1.0, 300 = 3.0 (RaceMenu's top end).");
+			TextWrapped("Values are weight x 100: 100 = 1.0, 300 = 3.0 (RaceMenu's top end).");
 
 			const auto& ch = Channels();
 			const char* group = "";
@@ -145,7 +215,7 @@ namespace FaceLab::Menu
 				}
 				if (std::string_view(ch[i].group) != group) {
 					group = ch[i].group;
-					G::SeparatorText(group);
+					SeparatorText(group);
 				}
 				G::PushID(static_cast<int>(i));
 				G::PushItemWidth(360.0f);
@@ -164,13 +234,13 @@ namespace FaceLab::Menu
 				std::string            family;
 				std::vector<ExtraName> names;
 				const bool             ok = ExtrasSnapshot(family, names);
-				G::SeparatorText(ok && !family.empty() ? ("Extra morphs of this head - " + family).c_str() : "Extra morphs of this head");
+				SeparatorText(ok && !family.empty() ? TF("Extra morphs of this head - {}", family).c_str() : "Extra morphs of this head");
 				if (!ok) {
-					G::TextWrapped("The target has no supported head yet (or its morph files are still being read).");
+					TextWrapped("The target has no supported head yet (or its morph files are still being read).");
 				} else if (names.empty()) {
-					G::TextWrapped("This head has no morphs beyond the standard ones above.");
+					TextWrapped("This head has no morphs beyond the standard ones above.");
 				} else {
-					G::TextWrapped("Names that only some heads have. Values are weight x 100, like the sliders above. Saved by name.");
+					TextWrapped("Names that only some heads have. Values are weight x 100, like the sliders above. Saved by name.");
 					for (const bool whole : { true, false }) {
 						bool any = false;
 						for (const auto& n : names) {
@@ -181,7 +251,7 @@ namespace FaceLab::Menu
 						if (!any) {
 							continue;
 						}
-						G::SeparatorText(whole ? "The whole face follows (the head and its face parts have the morph)" : "Head only (the mouth, lashes and brows have no such morph, so they may not follow)");
+						SeparatorText(whole ? "The whole face follows (the head and its face parts have the morph)" : "Head only (the mouth, lashes and brows have no such morph, so they may not follow)");
 						for (const auto& n : names) {
 							if ((n.parts > 0) != whole) {
 								continue;
@@ -197,7 +267,9 @@ namespace FaceLab::Menu
 							}
 							G::PopItemWidth();
 							if (n.partsTotal > 0) {
-								Tip(std::format("{} of the head's {} other face parts have this morph.", n.parts, n.partsTotal).c_str());
+								if (G::IsItemHovered()) {
+										G::SetTooltip("%s", TF("{} of the head's {} other face parts have this morph.", n.parts, n.partsTotal).c_str());
+									}
 							}
 							G::PopID();
 						}
@@ -256,17 +328,17 @@ namespace FaceLab::Menu
 			auto& s = GetSettings();
 			bool  save = false;
 
-			G::SeparatorText("Assists");
-			G::TextWrapped("Helpers that sit on top of whatever face is showing. They are not part of a face and do not change your presets. Hover a title to see what it is for.");
+			SeparatorText("Assists");
+			TextWrapped("Helpers that sit on top of whatever face is showing. They are not part of a face and do not change your presets. Hover a title to see what it is for.");
 
-			G::TextColored(kGood, "Mouth assist");
+			TextCol(kGood, "Mouth assist");
 			Tip("Keeps the mouth open in oral scenes during the moments the scene has not opened it yet, for example the seconds after a position change or when a tongue is put in. It fades away as the scene's own open mouth takes over, so it never fights it. 0 = off.");
 			{
 				const int mi = ChannelIndex("MouthAssist");
 				if (mi >= 0) {
 					G::PushID("mouthassist");
 					G::PushItemWidth(360.0f);
-					if (G::SliderInt("How much (100 = 1.0)", &s.values[static_cast<std::size_t>(mi)], 0, 300)) {
+					if (SliderInt("How much (100 = 1.0)", &s.values[static_cast<std::size_t>(mi)], 0, 300)) {
 						save = true;
 						if (s.live) {
 							ApplyOne(mi);
@@ -277,11 +349,11 @@ namespace FaceLab::Menu
 				}
 			}
 
-			G::TextColored(kGood, "Tongue assist");
+			TextCol(kGood, "Tongue assist");
 			{
 				G::PushID("tongueamount");
 				G::PushItemWidth(360.0f);
-				if (G::SliderInt("How far out (100 = fully)", &s.tongueOut, 0, 100)) {
+				if (SliderInt("How far out (100 = fully)", &s.tongueOut, 0, 100)) {
 					save = true;
 					ApplyTongueAmount();
 				}
@@ -289,25 +361,25 @@ namespace FaceLab::Menu
 				Tip("The Tongue assist: puts the tongue out on the target whatever face is showing, a preset you applied, another mod's face, or none. It is added on top, so it never replaces your face. The tongue itself is drawn by a tongue mod (FaceLab draws none). The same button is on the tongue hotkey on the Controls page.");
 				G::PopID();
 				const bool tl = TongueModInstalled();
-				G::TextColored(tl ? kGood : kWarn, "%s", tl ? "A tongue mod is installed: it draws the tongue." : "No tongue mod was found: nothing will be drawn without one.");
+				TextCol(tl ? kGood : kWarn, "%s", Loc::T(tl ? "A tongue mod is installed: it draws the tongue." : "No tongue mod was found: nothing will be drawn without one."));
 				const int ti = ChannelIndex("TongueOut");
 				if (ti >= 0 && s.values[static_cast<std::size_t>(ti)] > 0) {
-					G::TextColored(kWarn, "The face in the sliders also asks for a tongue (%d) as part of itself.", s.values[static_cast<std::size_t>(ti)]);
+					TextCol(kWarn, "The face in the sliders also asks for a tongue (%d) as part of itself.", s.values[static_cast<std::size_t>(ti)]);
 					G::SameLine();
-					if (G::SmallButton("Take it out of the face")) {
+					if (SmallButton("Take it out of the face")) {
 						s.values[static_cast<std::size_t>(ti)] = 0;
 						save = true;
 					}
 				}
 			}
 
-			G::TextColored(kGood, "Oral assist");
+			TextCol(kGood, "Oral assist");
 			Tip("Tells FaceLab this is an oral scene, so the face you apply does not fight the scene's own mouth: emotion channels leave the lips alone, mouth channels give way as the scene's mouth opens, and the mouth is held through the short face rebuild when a tongue appears. Leave it off outside oral scenes.");
 			{
 				const int oi = ChannelIndex("OralMode");
 				if (oi >= 0) {
 					bool oral = s.values[static_cast<std::size_t>(oi)] >= 50;
-					if (G::Checkbox("Treat this face as an oral scene", &oral)) {
+					if (Checkbox("Treat this face as an oral scene", &oral)) {
 						s.values[static_cast<std::size_t>(oi)] = oral ? 100 : 0;
 						save = true;
 						if (s.live) {
@@ -317,11 +389,11 @@ namespace FaceLab::Menu
 				}
 			}
 
-			G::TextColored(kGood, "Eye assist");
+			TextCol(kGood, "Eye assist");
 			Tip("On a head with add-on eyes (Advanced Eyes Addon) the eyeball is only a front cap. Turned far up or down, the dark rim of the cap comes into the lid opening as a thick dark line. This limits how far the eyes turn up or down (degrees, both eyes together with every gaze mod). Lower = a thinner line but the eyes follow you less vertically. Sideways looks are not limited by it, and heads with stock eyes are left alone.");
 			G::PushID("vertlimit");
 			G::PushItemWidth(360.0f);
-			if (G::SliderInt("Most the eyes turn up / down (degrees)", &s.vertLimit, 4, 60)) {
+			if (SliderInt("Most the eyes turn up / down (degrees)", &s.vertLimit, 4, 60)) {
 				save = true;
 				Morph::SetVertLimit(static_cast<float>(s.vertLimit));
 			}
@@ -329,7 +401,7 @@ namespace FaceLab::Menu
 			G::PopID();
 			G::PushID("lidfollow");
 			G::PushItemWidth(360.0f);
-			if (G::SliderInt("How much the lids follow a vertical look (%)", &s.lidFollow, 0, 250)) {
+			if (SliderInt("How much the lids follow a vertical look (%)", &s.lidFollow, 0, 250)) {
 				save = true;
 				Morph::SetLidFollow(static_cast<float>(s.lidFollow) / 100.0f);
 			}
@@ -338,7 +410,7 @@ namespace FaceLab::Menu
 			G::PopID();
 			G::PushID("shadowstrength");
 			G::PushItemWidth(360.0f);
-			if (G::SliderInt("Eye shadow strength (%)", &s.shadowStrength, 0, 100)) {
+			if (SliderInt("Eye shadow strength (%)", &s.shadowStrength, 0, 100)) {
 				save = true;
 				Morph::SetShadowStrength(static_cast<float>(s.shadowStrength) / 100.0f);
 			}
@@ -347,12 +419,12 @@ namespace FaceLab::Menu
 			G::PopID();
 
 			G::PushID("ubeeyes");
-			G::SeparatorText("UBE eyes");
+			SeparatorText("UBE eyes");
 			G::PushItemWidth(360.0f);
 			bool ubeChanged = false;
-			ubeChanged |= G::SliderInt("Sideways (% change)", &s.ubeSide, -100, 100, "%+d %%");
-			ubeChanged |= G::SliderInt("Down (% change)", &s.ubeDown, -100, 100, "%+d %%");
-			ubeChanged |= G::SliderInt("Up (% change)", &s.ubeUp, -100, 100, "%+d %%");
+			ubeChanged |= SliderInt("Sideways (% change)", &s.ubeSide, -100, 100, "%+d %%");
+			ubeChanged |= SliderInt("Down (% change)", &s.ubeDown, -100, 100, "%+d %%");
+			ubeChanged |= SliderInt("Up (% change)", &s.ubeUp, -100, 100, "%+d %%");
 			G::PopItemWidth();
 			if (ubeChanged) {
 				save = true;
@@ -374,18 +446,18 @@ namespace FaceLab::Menu
 			static std::string status;
 			auto               all = Presets::All();
 
-			G::TextWrapped("Faces that mods ask for by name. Any mod can ship Data/SKSE/Plugins/FaceLab/Presets/<Mod>.toml. Pick one, load it into the sliders on the Face page, change it, and save it back.");
-			if (G::Button("Reload preset files")) {
+			TextWrapped("Faces that mods ask for by name. Any mod can ship Data/SKSE/Plugins/FaceLab/Presets/<Mod>.toml. Pick one, load it into the sliders on the Face page, change it, and save it back.");
+			if (Button("Reload preset files")) {
 				Presets::Load();
 				sel = -1;
 			}
 			G::SameLine();
-			G::Text("%d presets", static_cast<int>(all.size()));
+			Text("%d presets", static_cast<int>(all.size()));
 			if (Applied()) {
-				G::TextColored(kWarn, "A lab face is ON (it overrides other mods' faces on the target). Press Reset on the Face page, or wait for it to expire.");
+				TextCol(kWarn, "A lab face is ON (it overrides other mods' faces on the target). Press Reset on the Face page, or wait for it to expire.");
 			}
 
-			G::SeparatorText("Presets");
+			SeparatorText("Presets");
 			if (G::BeginChild("##presetlist", G::ImVec2(0.0f, 260.0f), 0, 0)) {
 				for (int i = 0; i < static_cast<int>(all.size()); ++i) {
 					const std::string label = std::format("{}   ({})##{}", all[static_cast<std::size_t>(i)].name, all[static_cast<std::size_t>(i)].file, i);
@@ -399,34 +471,34 @@ namespace FaceLab::Menu
 			const bool have = sel >= 0 && sel < static_cast<int>(all.size());
 			if (have) {
 				const auto& p = all[static_cast<std::size_t>(sel)];
-				G::Text("Selected: %s", p.name.c_str());
-				if (G::Button("Load into the sliders")) {
+				Text("Selected: %s", p.name.c_str());
+				if (Button("Load into the sliders")) {
 					SlidersFrom(p);
-					status = "Loaded " + p.name + " into the sliders (Face page).";
+					status = TF("Loaded {} into the sliders (Face page).", p.name);
 				}
 				G::SameLine();
-				if (G::Button("Load and apply to the target")) {
+				if (Button("Load and apply to the target")) {
 					SlidersFrom(p);
 					ApplyAll();
-					status = "Applied " + p.name + ".";
+					status = TF("Applied {}.", p.name);
 				}
 				G::SameLine();
-				if (G::Button("Save the sliders over this preset")) {
-					status = Presets::Save(SlidersAs(p.name, p.file)) ? "Saved " + p.name + " to " + p.file : "Could not write " + p.file;
+				if (Button("Save the sliders over this preset")) {
+					status = Presets::Save(SlidersAs(p.name, p.file)) ? TF("Saved {} to {}", p.name, p.file) : TF("Could not write {}", p.file);
 				}
 			}
 
-			G::SeparatorText("New preset");
+			SeparatorText("New preset");
 			G::PushItemWidth(380.0f);
-			G::InputText("Name", newName, sizeof(newName));
+			G::InputText(Loc::L("Name"), newName, sizeof(newName));
 			G::PopItemWidth();
 			G::SameLine();
-			if (G::Button("Save the sliders as this name")) {
-				status = Presets::Save(SlidersAs(newName, "")) ? std::string("Saved ") + newName + " to User.toml" : "Could not write User.toml";
+			if (Button("Save the sliders as this name")) {
+				status = Presets::Save(SlidersAs(newName, "")) ? TF("Saved {} to User.toml", std::string(newName)) : std::string(Loc::T("Could not write User.toml"));
 			}
-			G::TextWrapped("Naming: Pack.Context.Name, e.g. MyPack.Blowjob. A name may end in .Displeased, .Neutral or .Pleased; a missing Displeased / Pleased falls back to the same name with Neutral, then the name without the ending.");
+			TextWrapped("Naming: Pack.Context.Name, e.g. MyPack.Blowjob. A name may end in .Displeased, .Neutral or .Pleased; a missing Displeased / Pleased falls back to the same name with Neutral, then the name without the ending.");
 			if (!status.empty()) {
-				G::TextColored(kGood, "%s", status.c_str());
+				TextCol(kGood, "%s", status.c_str());
 			}
 		}
 
@@ -435,21 +507,21 @@ namespace FaceLab::Menu
 			G::PushID(label);
 			Input::PollCapture();
 			const bool capturing = Input::CurrentCapture() == which;
-			G::Text("%-22s", label);
+			Text("%-22s", Loc::T(label));
 			G::SameLine(240.0f);
 			if (capturing) {
-				G::TextColored(kWarn, pad ? "press a gamepad button..." : "press a key... (Esc cancels)");
+				TextCol(kWarn, pad ? "press a gamepad button..." : "press a key... (Esc cancels)");
 			} else {
 				const std::string name = pad ? Input::PadName(value) : Input::KeyName(value);
-				G::Text("%s", name.c_str());
+				Text("%s", name.c_str());
 			}
 			G::SameLine(420.0f);
-			if (G::SmallButton(capturing ? "Cancel" : "Set")) {
+			if (SmallButton(capturing ? "Cancel" : "Set")) {
 				Input::BeginCapture(capturing ? Input::Capture::None : which);
 			}
 			if (optional) {
 				G::SameLine();
-				if (G::SmallButton("Clear")) {
+				if (SmallButton("Clear")) {
 					auto& s = GetSettings();
 					switch (which) {
 					case Input::Capture::KbMod: s.kbMod = -1; break;
@@ -473,29 +545,29 @@ namespace FaceLab::Menu
 		{
 			auto& s = GetSettings();
 			bool  save = false;
-			G::SeparatorText("Scene rules");
-			G::TextWrapped("When an OStim or SexLab scene starts, changes, or reaches an orgasm, FaceLab can put a preset on the actors it fits. Which preset goes with which kind of scene is decided by rule files in Data/SKSE/Plugins/FaceLab/Scenes/. FaceLab ships none; a rule pack (or your own files) supplies them.");
-			save |= G::Checkbox("Apply faces from scene rules", &s.scenes);
+			SeparatorText("Scene rules");
+			TextWrapped("When an OStim or SexLab scene starts, changes, or reaches an orgasm, FaceLab can put a preset on the actors it fits. Which preset goes with which kind of scene is decided by rule files in Data/SKSE/Plugins/FaceLab/Scenes/. FaceLab ships none; a rule pack (or your own files) supplies them.");
+			save |= Checkbox("Apply faces from scene rules", &s.scenes);
 			Tip("Off = the rules are ignored. Faces other mods ask for and the ones you apply by hand are not affected.");
 			const auto info = Scenes::GetInfo();
-			G::TextColored(info.ostim ? kGood : kWarn, "OStim: %s", info.ostim ? "found" : "not found");
+			TextCol(info.ostim ? kGood : kWarn, "OStim: %s", Loc::T(info.ostim ? "found" : "not found"));
 			G::SameLine();
-			G::TextColored(info.sexlab ? kGood : kWarn, "   SexLab: %s", info.sexlab ? "found" : "not found");
-			G::Text("%d rule(s) loaded", info.rules);
+			TextCol(info.sexlab ? kGood : kWarn, "   SexLab: %s", Loc::T(info.sexlab ? "found" : "not found"));
+			Text("%d rule(s) loaded", info.rules);
 			G::SameLine();
-			if (G::SmallButton("Reload the rule files")) {
+			if (SmallButton("Reload the rule files")) {
 				Scenes::LoadRules();
 			}
 			Tip("Read Data/SKSE/Plugins/FaceLab/Scenes/*.toml again after you edit a rule. Presets are re-read on the Presets page.");
 			for (const auto& p : info.problems) {
-				G::TextColored(kWarn, "%s", p.c_str());
+				TextCol(kWarn, "%s", p.c_str());
 			}
-			G::SeparatorText("What the rules did lately");
+			SeparatorText("What the rules did lately");
 			if (info.log.empty()) {
-				G::TextWrapped("Nothing yet. Start a scene; the rule that fits shows up here, newest last.");
+				TextWrapped("Nothing yet. Start a scene; the rule that fits shows up here, newest last.");
 			}
 			for (const auto& l : info.log) {
-				G::TextWrapped("%s", l.c_str());
+				TextWrapped("%s", l.c_str());
 			}
 			if (save) {
 				SaveConfig();
@@ -506,26 +578,26 @@ namespace FaceLab::Menu
 		{
 			auto& s = GetSettings();
 			bool  save = false;
-			G::TextWrapped("Tools for finding out what a face or a head is doing. Off for normal use.");
-			save |= G::Checkbox("Debug tools", &s.debug);
+			TextWrapped("Tools for finding out what a face or a head is doing. Off for normal use.");
+			save |= Checkbox("Debug tools", &s.debug);
 			Tip("Shows the Probe / Poke tests and writes measurement lines to FaceLab.log. Off for normal use.");
 			if (s.debug) {
-				save |= G::Checkbox("Also patch the second base-vertex copy (FMD)", &s.bump);
+				save |= Checkbox("Also patch the second base-vertex copy (FMD)", &s.bump);
 				Tip("The first copy (FOD) is always patched. Only turn this on if a face does not hold. Takes effect the next time you press Apply.");
-				if (G::Button("Probe: find the face's base vertices (writes PROBE lines to the log)")) {
+				if (Button("Probe: find the face's base vertices (writes PROBE lines to the log)")) {
 					ProbeModel();
 				}
-				if (G::Button("Poke test: lift the face mesh 40 units for 8 s")) {
+				if (Button("Poke test: lift the face mesh 40 units for 8 s")) {
 					PokeTest();
 				}
-				G::SeparatorText("Hide a face shape (finds what draws something wrong)");
-				G::TextWrapped("Tick a shape to hide it on the target right now; untick to bring it back. Hiding the one that draws the odd thing makes it vanish. Not saved.");
+				SeparatorText("Hide a face shape (finds what draws something wrong)");
+				TextWrapped("Tick a shape to hide it on the target right now; untick to bring it back. Hiding the one that draws the odd thing makes it vanish. Not saved.");
 				{
 					std::vector<std::string> shapeNames;
 					ShapeSnapshot(shapeNames);
 					for (const auto& n : shapeNames) {
 						bool hid = ShapeHidden(n);
-						if (G::Checkbox(n.c_str(), &hid)) {
+						if (Checkbox(n.c_str(), &hid)) {
 							SetShapeHidden(n, hid);
 						}
 					}
@@ -540,18 +612,55 @@ namespace FaceLab::Menu
 		void __stdcall PageControls()
 		{
 			auto& s = GetSettings();
-			G::SeparatorText("Hotkey");
-			if (G::Checkbox("FaceLab hotkey enabled", &s.enabled)) {
+			SeparatorText("Language");
+			{
+				// "Automatic" follows the game's language; the rest are the files in FaceLab/Languages
+				static std::vector<std::string>              langs;
+				static std::chrono::steady_clock::time_point lastScan{};
+				const auto                                   nowT = std::chrono::steady_clock::now();
+				if (langs.empty() || nowT - lastScan > std::chrono::seconds(3)) {
+					langs = Loc::Available();
+					lastScan = nowT;
+				}
+				std::vector<std::string> shown{ Loc::T("Automatic (the game's language)") };
+				shown.insert(shown.end(), langs.begin(), langs.end());
+				int pick = 0;
+				if (s.language != "auto") {
+					for (std::size_t i = 0; i < langs.size(); ++i) {
+						if (langs[i] == s.language) {
+							pick = static_cast<int>(i) + 1;
+						}
+					}
+				}
+				std::vector<const char*> ptrs;
+				for (auto& n : shown) {
+					ptrs.push_back(n.c_str());
+				}
+				G::PushItemWidth(320.0f);
+				if (G::Combo(Loc::L("Language"), &pick, ptrs.data(), static_cast<int>(ptrs.size()))) {
+					s.language = pick == 0 ? std::string("auto") : langs[static_cast<std::size_t>(pick) - 1];
+					Loc::Set(s.language);
+					SaveConfig();
+				}
+				G::PopItemWidth();
+				Tip("Languages are the .toml files in Data/SKSE/Plugins/FaceLab/Languages (English.toml is the template to translate). Automatic uses the language the game is set to. The names in the left-hand list change after the next start of the game.");
+				if (const auto need = Loc::FontAdvice(); !need.empty()) {
+					TextCol(kWarn, "This language needs the font '%s' in SKSE Menu Framework (its settings page, Font), otherwise its letters show as ????. Restart the game after changing it.", need.c_str());
+				}
+			}
+
+			SeparatorText("Hotkey");
+			if (Checkbox("FaceLab hotkey enabled", &s.enabled)) {
 				SaveConfig();
 			}
-			G::TextWrapped("The hotkey toggles: it applies the sliders to the target, and the next press resets the face. Keyboard and gamepad are separate. Defaults for the gamepad: X while holding D-pad Down.");
+			TextWrapped("The hotkey toggles: it applies the sliders to the target, and the next press resets the face. Keyboard and gamepad are separate. Defaults for the gamepad: X while holding D-pad Down.");
 			BindRow("Keyboard key", "The key that toggles the face.", Input::Capture::KbKey, s.kbKey, false, true);
 			BindRow("Keyboard modifier", "Optional: this key must be HELD when you press the key above.", Input::Capture::KbMod, s.kbMod, false, true);
 			BindRow("Gamepad button", "The gamepad button that toggles the face.", Input::Capture::PadKey, s.padKey, true, true);
 			BindRow("Gamepad modifier", "Optional: this button must be HELD when you press the button above.", Input::Capture::PadMod, s.padMod, true, true);
 
-			G::SeparatorText("Tongue hotkey");
-			G::TextWrapped("Shows or puts away the Tongue assist on the target, on top of whatever face is showing. Needs a tongue mod that works with FaceLab. Unset by default.");
+			SeparatorText("Tongue hotkey");
+			TextWrapped("Shows or puts away the Tongue assist on the target, on top of whatever face is showing. Needs a tongue mod that works with FaceLab. Unset by default.");
 			BindRow("Tongue: keyboard key", "The key that toggles the tongue.", Input::Capture::TongueKbKey, s.tKbKey, false, true);
 			BindRow("Tongue: keyboard modifier", "Optional: this key must be HELD when you press the key above.", Input::Capture::TongueKbMod, s.tKbMod, false, true);
 			BindRow("Tongue: gamepad button", "The gamepad button that toggles the tongue.", Input::Capture::TonguePadKey, s.tPadKey, true, true);
@@ -566,12 +675,12 @@ namespace FaceLab::Menu
 			return;
 		}
 		SKSEMenuFramework::SetSection("FaceLab");
-		SKSEMenuFramework::AddSectionItem("Face", PageFace);
-		SKSEMenuFramework::AddSectionItem("Assists", PageAssists);
-		SKSEMenuFramework::AddSectionItem("Presets", PagePresets);
-		SKSEMenuFramework::AddSectionItem("Scenes", PageScenes);
-		SKSEMenuFramework::AddSectionItem("Controls", PageControls);
-		SKSEMenuFramework::AddSectionItem("Debug", PageDebug);
+		SKSEMenuFramework::AddSectionItem(Loc::T("Face"), PageFace);
+		SKSEMenuFramework::AddSectionItem(Loc::T("Assists"), PageAssists);
+		SKSEMenuFramework::AddSectionItem(Loc::T("Presets"), PagePresets);
+		SKSEMenuFramework::AddSectionItem(Loc::T("Scenes"), PageScenes);
+		SKSEMenuFramework::AddSectionItem(Loc::T("Controls"), PageControls);
+		SKSEMenuFramework::AddSectionItem(Loc::T("Debug"), PageDebug);
 		logger::info("SKSE Menu Framework pages registered (section: FaceLab)");
 	}
 }

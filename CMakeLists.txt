@@ -27,6 +27,7 @@ add_library(FaceLab SHARED
 	src/Families.cpp
 	src/FamilyLoad.cpp
 	src/Scenes.cpp
+	src/Loc.cpp
 )
 target_include_directories(FaceLab PRIVATE src)
 target_precompile_headers(FaceLab PRIVATE src/PCH.h)

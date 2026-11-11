@@ -19,6 +19,7 @@ namespace FaceLab
 	struct Settings
 	{
 		bool enabled = true;
+		std::string language = "auto";  // menu language: "auto" = the game's language, or a file name in Data/SKSE/Plugins/FaceLab/Languages
 		int  kbKey = -1;
 		int  kbMod = -1;
 		int  padKey = 0x4000;  // X
